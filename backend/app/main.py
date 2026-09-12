@@ -4,13 +4,15 @@ import uuid
 import threading
 from pathlib import Path
 
-import cv2
-import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from .models import Document, Candidates, Corners, Effort, ResetConfirmation
 from .detector import UnconfiguredDetector
+from .perspective import build_transform, transform_points, normalize_image
+
+NORMALIZATION = json.loads(Path(os.environ.get('VARROA_NORMALIZATION_CONFIG',
+    Path(__file__).resolve().parents[2] / 'normalization.json')).read_text('utf-8'))
 
 ROOT = Path(os.environ.get('VARROA_DATA_DIR', Path(__file__).resolve().parents[2] / 'data'))
 for folder in ('images', 'corrected', 'annotations'):
@@ -46,8 +48,18 @@ def validate_points(doc):
     points = doc.annotations + doc.rejected_predictions
     if len({p.id for p in points}) != len(points):
         raise HTTPException(422, 'Annotation IDs must be unique')
-    if any(not (0 <= p.x < doc.original_width and 0 <= p.y < doc.original_height) for p in points):
-        raise HTTPException(422, 'Coordinates outside original image')
+    width, height = doc.original_width, doc.original_height
+    if doc.coordinate_space == 'canonical':
+        if not doc.perspective or doc.perspective.get('version') != 1:
+            raise HTTPException(422, 'Canonical coordinates require physical normalization')
+        width, height = doc.perspective['output_width'], doc.perspective['output_height']
+    if any(not (0 <= p.x < width and 0 <= p.y < height) for p in points):
+        raise HTTPException(422, 'Coordinates outside analysis image; region excludes annotations. Original document preserved.')
+
+
+@app.get('/api/normalization')
+def normalization_config():
+    return NORMALIZATION
 
 
 @app.get('/api/images')
@@ -135,8 +147,12 @@ def save(image_id: str, doc: Document):
         old = read(image_id)
         if (doc.image_id, doc.original_width, doc.original_height, doc.filename) != (old.image_id, old.original_width, old.original_height, old.filename):
             raise HTTPException(422, 'Image metadata is immutable')
-        validate_points(doc)
+        if doc.coordinate_space != old.coordinate_space or doc.perspective != old.perspective:
+            raise HTTPException(409, 'Stale coordinate space or transform; reload image')
+        if doc.coordinate_space != 'canonical' and (doc.annotations != old.annotations or doc.rejected_predictions != old.rejected_predictions):
+            raise HTTPException(409, 'Generate physical correction before editing legacy annotations')
         doc.perspective = old.perspective
+        validate_points(doc)
         write(doc)
         return doc
 
@@ -147,6 +163,8 @@ def candidates(image_id: str, payload: Candidates):
         doc = read(image_id)
         if doc.model_version is not None:
             raise HTTPException(409, 'This image already has a prediction batch')
+        if doc.coordinate_space != 'canonical' or payload.perspective_file != doc.perspective['file']:
+            raise HTTPException(409, 'Candidates must reference the current canonical perspective_file')
         for p in payload.annotations:
             p.source = 'model'
             p.reviewed = False
@@ -161,22 +179,38 @@ def candidates(image_id: str, payload: Candidates):
 def perspective(image_id: str, payload: Corners):
     with lock:
         doc = read(image_id)
-        src = np.float32([[p.x, p.y] for p in payload.corners])
-        if any(not (0 <= p.x < doc.original_width and 0 <= p.y < doc.original_height) for p in payload.corners):
-            raise HTTPException(422, 'Corners outside image')
-        if not cv2.isContourConvex(src) or abs(cv2.contourArea(src)) < 4:
-            raise HTTPException(422, 'Corners must form a non-degenerate convex quadrilateral in perimeter order')
-        w = max(2, round(max(np.linalg.norm(src[1]-src[0]), np.linalg.norm(src[2]-src[3]))))
-        h = max(2, round(max(np.linalg.norm(src[3]-src[0]), np.linalg.norm(src[2]-src[1]))))
-        if w * h > 80_000_000:
-            raise HTTPException(422, 'Corrected image exceeds 80 megapixels')
-        matrix = cv2.getPerspectiveTransform(src, np.float32([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]]))
-        image = cv2.imread(str(ROOT / 'images' / f'{image_id}.png'))
-        corrected = cv2.warpPerspective(image, matrix, (w, h))
+        before = path(image_id).read_text('utf-8')
+        profile = NORMALIZATION['board_profiles'].get(payload.board_profile) if payload.board_profile else None
+        if payload.board_profile and not profile:
+            raise HTTPException(422, 'Unknown board profile')
+        width_mm = payload.physical_width_mm if payload.physical_width_mm is not None else (profile or {}).get('physical_width_mm')
+        height_mm = payload.physical_height_mm if payload.physical_height_mm is not None else (profile or {}).get('physical_height_mm')
+        if width_mm is None or height_mm is None:
+            raise HTTPException(422, 'Choose a board profile or provide physical width and height in mm')
+        try:
+            metadata = build_transform([[p.x, p.y] for p in payload.corners], doc.original_width,
+                doc.original_height, width_mm, height_mm, NORMALIZATION['pixels_per_mm'],
+                NORMALIZATION['min_source_scale_ratio'], NORMALIZATION['quality_policy'])
+            points = doc.annotations + doc.rejected_predictions
+            coordinates = [[p.x, p.y] for p in points]
+            if doc.coordinate_space == 'canonical':
+                coordinates = transform_points(coordinates, doc.perspective['inverse_homography'])
+            coordinates = transform_points(coordinates, metadata['homography'])
+            for point, (x, y) in zip(points, coordinates):
+                point.x, point.y = x, y
+            doc.coordinate_space = 'canonical'
+            doc.perspective = metadata
+            validate_points(doc)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with Image.open(ROOT / 'images' / f'{image_id}.png') as image:
+            corrected = normalize_image(image, metadata)
         name = f'{image_id}-{uuid.uuid4()}.png'
-        if not cv2.imwrite(str(ROOT / 'corrected' / name), corrected):
-            raise HTTPException(500, 'Could not write corrected image')
-        doc.perspective = {'source_corners': src.tolist(), 'homography': matrix.tolist(), 'inverse_homography': np.linalg.inv(matrix).tolist(), 'width': w, 'height': h, 'file': name}
+        corrected.save(ROOT / 'corrected' / name)
+        doc.perspective.update(file=name, board_profile=payload.board_profile)
+        archive = ROOT / 'history'
+        archive.mkdir(exist_ok=True)
+        (archive / f'{image_id}-{uuid.uuid4()}.json').write_text(before, encoding='utf-8')
         write(doc)
         return doc
 
@@ -192,6 +226,8 @@ def corrected_file(image_id: str):
 @app.get('/api/images/{image_id}/export')
 def export(image_id: str):
     doc = read(image_id)
+    if doc.coordinate_space != 'canonical':
+        raise HTTPException(409, 'Normalize physical region before training export')
     if any(not p.reviewed for p in doc.annotations):
         raise HTTPException(409, 'Review all annotations before ground-truth export')
     return doc

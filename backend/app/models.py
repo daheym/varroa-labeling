@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 class Point(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     x: float = Field(allow_inf_nan=False)
     y: float = Field(allow_inf_nan=False)
 
@@ -31,7 +32,7 @@ class Document(BaseModel):
     filename: str
     original_width: int
     original_height: int
-    coordinate_space: Literal['original'] = 'original'
+    coordinate_space: Literal['original', 'canonical'] = 'original'
     perspective: dict | None = None
     dataset_version: str = '1'
     model_version: str | None = None
@@ -41,12 +42,18 @@ class Document(BaseModel):
 
 
 class Candidates(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     model_version: str = Field(min_length=1)
+    coordinate_space: Literal['canonical']
+    perspective_file: str
     annotations: list[Annotation]
 
 
 class Corners(BaseModel):
     corners: list[Point] = Field(min_length=4, max_length=4)
+    board_profile: str | None = None
+    physical_width_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    physical_height_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class ResetConfirmation(BaseModel):

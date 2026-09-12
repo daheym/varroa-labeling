@@ -27,17 +27,19 @@ For the exact tested Python dependencies use `backend/requirements-lock.txt`; th
 ## Workflow
 
 1. Upload a JPEG/PNG or select a previously uploaded image.
-2. In Manual Mode, click to add a reviewed human annotation. Click markers to select; drag to correct coordinates; Delete/Backspace removes the selection.
+2. First complete physical perspective correction (step 5). In Corrected view and Manual Mode, click to add a reviewed human annotation. Click markers to select; drag to correct coordinates; Delete/Backspace removes the selection.
 3. Wheel zooms around the pointer. Hold Space while dragging to pan. Fit image resets the view. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z redoes. History retains 100 edits within the current image session.
 4. Model Review Mode accepts candidate JSON using the format below. Amber dashed markers are unreviewed model candidates; green markers are human or reviewed. Accept selected, drag to correct (also marks reviewed), delete to reject, and click the image to add missed mites. Model provenance is preserved when correcting a prediction. Mark all reviewed explicitly confirms every remaining candidate.
-5. Perspective correction: enable Place corners and click top-left, top-right, bottom-right, bottom-left. Drag corners, then Generate corrected image. Open the resulting image in a separate tab. Annotation editing remains on the original image.
+5. In **Original** view select a board profile or enter its physical width/height in mm. Place corners in board top-left, top-right, bottom-right, bottom-left order; drag to refine. Lines mark the boundary and the exterior is shaded. Click **Generate corrected image** to persist and normalize at the configured pixels/mm. The app switches to **Corrected** view, where annotations are created and edited. Without correction, annotation is unavailable. Review any source-resolution warning. Corner edits are drafts until generation succeeds.
 6. JSON autosaves 600 ms after the last annotation change. Requests are serialized. Save now retries failed saves. Image switching, candidate import, correction, and export wait for saves; failed saves block these operations. Closing with unsaved work prompts the browser's standard warning. Export is blocked until every retained annotation is reviewed.
 
-Candidate import example (coordinates in original, EXIF-oriented pixels):
+Candidate import example (canonical pixels; replace perspective_file with the current document value):
 
 ```json
 {
   "model_version": "experiment-001",
+  "coordinate_space": "canonical",
+  "perspective_file": "<current perspective.file>",
   "annotations": [
     {"id":"candidate-1","className":"varroa","x":1234.5,"y":987.2,"source":"model","confidence":0.87,"reviewed":false}
   ]
@@ -57,11 +59,11 @@ data/corrected/       separate perspective-corrected PNGs
 data/annotations/     one atomically replaced JSON document per image
 ```
 
-Uploads are never resized. EXIF orientation is applied to a full-resolution display PNG; width, height and annotation coordinates refer to that oriented raster. The exact source bytes are retained separately and downloadable at `/api/images/{id}/original`. This explicitly avoids browser/OpenCV EXIF interpretation differences. Supported uploads are capped at 200 MB; Pillow's decompression-bomb protection also applies. Large decoded images require substantial browser/backend RAM; no thumbnails replace the annotation raster.
+Uploads are never resized. EXIF orientation is applied to a full-resolution display PNG; original width/height and source corners refer to that oriented raster; canonical annotation dimensions are stored in perspective metadata. The exact source bytes are retained separately and downloadable at `/api/images/{id}/original`. This explicitly avoids browser/OpenCV EXIF interpretation differences. Supported uploads are capped at 200 MB; Pillow's decompression-bomb protection also applies. Large decoded images require substantial browser/backend RAM; no thumbnails replace the annotation raster.
 
-Stage pointer positions are CSS pixels. The inverse transform is `(screen - translation) / scale`; device pixel ratio does not enter annotation coordinates. Markers keep constant screen size. Annotation moves commit only on drag end. Canvas resizing refits the viewport without modifying stored coordinates. Coordinates are fractional, bounded by `[0,width)` and `[0,height)`.
+Stage pointer positions are CSS pixels. The inverse transform is `(screen - translation) / scale`; device pixel ratio does not enter annotation coordinates. Markers keep constant screen size. Annotation moves commit only on drag end. Canvas resizing refits the viewport without modifying stored coordinates. Coordinates are fractional, bounded by `[0,canonical_width)` and `[0,canonical_height)`.
 
-JSON includes `image_id`, dimensions, `coordinate_space`, `perspective`, `dataset_version`, `model_version`, annotations, rejected prediction records, and effort statistics. Annotation class is named `className` consistently with the active-learning schema. Perspective metadata records source corners, homography and inverse, output size and generated filename. Apply the homography to original coordinates and divide by the homogeneous third component to map annotations into corrected pixels; export itself remains in original coordinates.
+JSON includes `image_id`, dimensions, `coordinate_space`, `perspective`, `dataset_version`, `model_version`, annotations, rejected prediction records, and effort statistics. Annotation class is named `className` consistently with the active-learning schema. Perspective metadata records source points, physical dimensions, pixels/mm, quality, homography and inverse, output size and generated filename. Export uses canonical coordinates. See [the normalization and migration contract](PERSPECTIVE.md) for deterministic geometry, per-image profiles, source quality, legacy conversion and the PWA contract.
 
 Effort counters record adds, acceptance actions, deletes, moves, undo and redo without erasing effort on undo. Current prediction/accepted/rejected/manual counts derive from document state. Active seconds estimates interaction time from gaps between edits capped at 60 seconds per action; it is not precise labor timing. Dataset version is user-controlled metadata. Review provenance and counters support future comparisons, but baseline experimental timing must be collected separately.
 
@@ -87,3 +89,5 @@ npm run build
 ```
 
 The production build goes to `frontend/dist`. Vite's development proxy is not embedded in the build: production hosting must route `/api` to FastAPI. The documented local workflow uses the Vite dev server.
+
+Normalization configuration: `normalization.json`, optionally overridden with `VARROA_NORMALIZATION_CONFIG`. The server owns the common scale; each image supplies its physical dimensions. Successful recorrections archive prior JSON in `data/history/`. Restart the backend after changing configuration.

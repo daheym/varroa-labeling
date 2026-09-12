@@ -15,13 +15,17 @@ def client(tmp_path, monkeypatch):
     return TestClient(main.app)
 
 
-def upload(client):
+def upload(client, corrected=True):
     data = io.BytesIO()
     Image.new('RGB', (120, 80), 'white').save(data, format='PNG')
     r = client.post('/api/images', files={'file': ('sample.png', data.getvalue(), 'image/png')})
     assert r.status_code == 200
     doc = r.json()
     assert client.get(f"/api/images/{doc['image_id']}/original").content == data.getvalue()
+    if corrected:
+        doc = client.post(f"/api/images/{doc['image_id']}/perspective", json={
+            'corners': [{'x':0,'y':0},{'x':119,'y':0},{'x':119,'y':79},{'x':0,'y':79}],
+            'physical_width_mm':15, 'physical_height_mm':10}).json()
     return doc
 
 
@@ -29,7 +33,7 @@ def test_review_persistence_and_export(client):
     doc = upload(client)
     base = f"/api/images/{doc['image_id']}"
     point = {'id': 'p1', 'x': 10.5, 'y': 20.25, 'className': 'varroa', 'source': 'model', 'confidence': .8, 'reviewed': False}
-    r = client.post(base+'/candidates', json={'model_version': 'detector-v1', 'annotations': [point]})
+    r = client.post(base+'/candidates', json={'model_version': 'detector-v1', 'coordinate_space':'canonical', 'perspective_file':doc['perspective']['file'], 'annotations': [point]})
     assert r.status_code == 200
     doc = r.json()
     assert client.get(base+'/export').status_code == 409
@@ -39,7 +43,7 @@ def test_review_persistence_and_export(client):
     assert json.loads(main.path(doc['image_id']).read_text())['annotations'][0]['x'] == 10.5
     doc['annotations'][0]['x'] = 120
     assert client.put(base+'/annotations', json=doc).status_code == 422
-    assert client.post(base+'/candidates', json={'model_version': 'v2', 'annotations': []}).status_code == 409
+    assert client.post(base+'/candidates', json={'model_version': 'v2', 'coordinate_space':'canonical', 'perspective_file':doc['perspective']['file'], 'annotations': []}).status_code == 409
 
 
 def test_perspective_metadata_and_original(client):
@@ -47,18 +51,18 @@ def test_perspective_metadata_and_original(client):
     base = f"/api/images/{doc['image_id']}"
     original = client.get(base+'/original').content
     corners = [{'x': 10, 'y': 10}, {'x': 100, 'y': 5}, {'x': 110, 'y': 70}, {'x': 5, 'y': 75}]
-    r = client.post(base+'/perspective', json={'corners': corners})
+    r = client.post(base+'/perspective', json={'corners': corners, 'physical_width_mm':15, 'physical_height_mm':10})
     assert r.status_code == 200
     p = r.json()['perspective']
     h = np.array(p['homography'])
-    for src, dest in zip(corners, [(0,0), (p['width']-1,0), (p['width']-1,p['height']-1), (0,p['height']-1)]):
+    for src, dest in zip(corners, [(0,0), (p['width'],0), (p['width'],p['height']), (0,p['height'])]):
         q = h @ [src['x'], src['y'], 1]
         assert np.allclose(q[:2]/q[2], dest)
     assert client.get(base+'/corrected').status_code == 200
     assert client.get(base+'/original').content == original
     assert client.post(base+'/perspective', json={'corners': [corners[0]]*4}).status_code == 422
     # Stale annotation snapshots must not erase server-owned perspective metadata.
-    assert client.put(base+'/annotations', json=doc).json()['perspective'] == p
+    assert client.put(base+'/annotations', json=doc).status_code == 409
 
 
 def test_validation_and_placeholders(client):
@@ -94,7 +98,7 @@ def test_reset_current_preserves_other_images_and_perspective(client):
     first, second = seeded_document(client), seeded_document(client)
     base = f"/api/images/{first['image_id']}"
     corners = [{'x': 0, 'y': 0}, {'x': 119, 'y': 0}, {'x': 119, 'y': 79}, {'x': 0, 'y': 79}]
-    perspective = client.post(base+'/perspective', json={'corners': corners}).json()['perspective']
+    perspective = client.post(base+'/perspective', json={'corners': corners, 'physical_width_mm':15, 'physical_height_mm':10}).json()['perspective']
     original = client.get(base+'/original').content
     result = client.post(base+'/annotations/reset')
     assert result.status_code == 200
@@ -107,7 +111,7 @@ def test_reset_current_preserves_other_images_and_perspective(client):
     assert client.get(base+'/original').content == original
     assert client.get(base+'/corrected').status_code == 200
     assert client.get(f"/api/images/{second['image_id']}").json() == second
-    assert client.post(base+'/candidates', json={'model_version': 'v2', 'annotations': []}).status_code == 200
+    assert client.post(base+'/candidates', json={'model_version': 'v2', 'coordinate_space':'canonical', 'perspective_file':doc['perspective']['file'], 'annotations': []}).status_code == 200
 
 
 def test_reset_all_requires_confirmation_and_persists(client):

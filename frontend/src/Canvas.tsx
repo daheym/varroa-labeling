@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KImage, Circle, Line, Text } from "react-konva";
+import { Stage, Layer, Image as KImage, Circle, Line, Text, Shape } from "react-konva";
 import {
   screenToImage,
   zoomAt,
@@ -18,8 +18,11 @@ type Props = {
   setCorners: (p: Point[]) => void;
   perspective: boolean;
   space: boolean;
+  corrected: boolean;
 };
 export default function Canvas(p: Props) {
+  const width = p.corrected ? p.doc.perspective!.width : p.doc.original_width;
+  const height = p.corrected ? p.doc.perspective!.height : p.doc.original_height;
   const container = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [image, setImage] = useState<HTMLImageElement>();
@@ -28,13 +31,13 @@ export default function Canvas(p: Props) {
   const fit = () => {
     const scale =
       Math.min(
-        size.width / p.doc.original_width,
-        size.height / p.doc.original_height,
+        size.width / width,
+        size.height / height,
       ) * 0.95;
     setView({
       scale,
-      x: (size.width - p.doc.original_width * scale) / 2,
-      y: (size.height - p.doc.original_height * scale) / 2,
+      x: (size.width - width * scale) / 2,
+      y: (size.height - height * scale) / 2,
     });
   };
   useEffect(() => {
@@ -56,16 +59,16 @@ export default function Canvas(p: Props) {
     img.onerror = () => {
       if (active) setError("Image could not be decoded. Reload to retry.");
     };
-    img.src = `/api/images/${p.doc.image_id}/file`;
+    img.src = `/api/images/${p.doc.image_id}/${p.corrected ? `corrected?v=${p.doc.perspective!.file}` : "file"}`;
     return () => {
       active = false;
     };
-  }, [p.doc.image_id]);
-  useEffect(fit, [p.doc.image_id, size.width, size.height]);
+  }, [p.doc.image_id, p.corrected, p.doc.perspective?.file]);
+  useEffect(fit, [p.doc.image_id, width, height, p.corrected, size.width, size.height]);
   return (
     <div className="canvas-wrap" ref={container}>
       <button className="fit" onClick={fit}>
-        Fit image · {Math.round(view.scale * 100)}%
+        {p.corrected ? "Corrected" : "Original"} / Fit image · {Math.round(view.scale * 100)}%
       </button>
       {!image && (
         <div className="canvas-message">
@@ -107,23 +110,23 @@ export default function Canvas(p: Props) {
           const pointer = stage.getPointerPosition();
           if (!pointer) return;
           const point = screenToImage(pointer, view);
-          if (!inside(point, p.doc.original_width, p.doc.original_height))
+          if (!inside(point, width, height))
             return;
           if (p.perspective) {
             if (p.corners.length < 4) p.setCorners([...p.corners, point]);
-          } else p.add(point);
+          } else if (p.corrected) p.add(point);
         }}
       >
         <Layer>
           <KImage
             name="photo"
             image={image}
-            width={p.doc.original_width}
-            height={p.doc.original_height}
+            width={width}
+            height={height}
           />
         </Layer>
         <Layer>
-          {!p.perspective &&
+          {p.corrected &&
             p.doc.annotations.map((a) => (
               <Circle
                 key={a.id}
@@ -158,16 +161,23 @@ export default function Canvas(p: Props) {
                 onDragEnd={(e) => {
                   const pt = clampPoint(
                     e.target.position(),
-                    p.doc.original_width,
-                    p.doc.original_height,
+                    width,
+                    height,
                   );
                   e.target.position(pt);
                   p.move(a.id, pt);
                 }}
               />
             ))}
-          {p.perspective && (
+          {!p.corrected && (
             <>
+              {p.corners.length === 4 && <Shape listening={false} sceneFunc={(ctx, shape) => {
+                ctx.beginPath(); ctx.rect(0, 0, width, height);
+                const reversed = [...p.corners].reverse();
+                ctx.moveTo(reversed[0].x, reversed[0].y);
+                reversed.slice(1).forEach(c => ctx.lineTo(c.x, c.y));
+                ctx.closePath(); ctx.fillStrokeShape(shape);
+              }} fill="rgba(0,0,0,0.55)" />}
               <Line
                 points={p.corners.flatMap((c) => [c.x, c.y])}
                 closed={p.corners.length === 4}
@@ -187,8 +197,8 @@ export default function Canvas(p: Props) {
                   onDragEnd={(e) => {
                     const pt = clampPoint(
                       e.target.position(),
-                      p.doc.original_width,
-                      p.doc.original_height,
+                      width,
+                      height,
                     );
                     e.target.position(pt);
                     p.setCorners(p.corners.map((q, j) => (j === i ? pt : q)));

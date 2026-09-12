@@ -26,6 +26,11 @@ export default function App() {
     [status, setStatus] = useState("Saved"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const [corrected, setCorrected] = useState(false);
+  const [normalization, setNormalization] = useState<{pixels_per_mm: number; board_profiles: Record<string, {physical_width_mm: number; physical_height_mm: number}>}>();
+  const [boardProfile, setBoardProfile] = useState("");
+  const [widthMm, setWidthMm] = useState("");
+  const [heightMm, setHeightMm] = useState("");
   const current = useRef<Doc | null>(null),
     past = useRef<Doc[]>([]),
     future = useRef<Doc[]>([]),
@@ -110,7 +115,7 @@ export default function App() {
   }
   function remove() {
     const d = current.current;
-    if (!d || !selected) return;
+    if (!d || !selected || !corrected) return;
     const a = d.annotations.find((a) => a.id === selected);
     if (!a) return;
     commit(
@@ -144,8 +149,12 @@ export default function App() {
     past.current = [];
     future.current = [];
     select(null);
-    setCorners([]);
-    setPerspective(false);
+    setCorners((d.perspective?.source_points || d.perspective?.source_corners || []).map(([x, y]) => ({x, y})));
+    setBoardProfile(d.perspective?.board_profile || "");
+    setWidthMm(String(d.perspective?.physical_width_mm || ""));
+    setHeightMm(String(d.perspective?.physical_height_mm || ""));
+    setCorrected(d.coordinate_space === "canonical");
+    setPerspective(d.coordinate_space !== "canonical");
     lastAction.current = Date.now();
   }
   async function resetAnnotations(all: boolean) {
@@ -201,6 +210,7 @@ export default function App() {
     });
   }
   useEffect(() => {
+    api<typeof normalization>("/api/normalization").then(setNormalization).catch(e => setError(String(e)));
     api<Doc[]>("/api/images")
       .then(setList)
       .catch((e) => setError(String(e)));
@@ -212,7 +222,7 @@ export default function App() {
         e.preventDefault();
         setSpace(true);
       }
-      if (busy) return;
+      if (busy || !corrected) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undo(e.shiftKey);
@@ -319,6 +329,11 @@ export default function App() {
               <p>
                 {doc.original_width} × {doc.original_height} original pixels
               </p>
+                <h2>Image view</h2>
+                <button disabled={busy} aria-pressed={!corrected} onClick={() => {setCorrected(false); select(null); setPerspective(true);}}>Original</button>
+                <button aria-pressed={corrected} disabled={busy || doc.coordinate_space !== "canonical"} onClick={() => {setCorrected(true); setPerspective(false); select(null);}}>Corrected</button>
+                {doc.coordinate_space !== "canonical" && <p>Corrected annotations unavailable. Define the board dimensions and generate correction. Legacy points will be migrated.</p>}
+                {doc.perspective?.quality_warning && <p role="alert">{doc.perspective.quality_warning}</p>}
               <label>
                 Annotation mode
                 <select value={mode} onChange={(e) => setMode(e.target.value)}>
@@ -338,19 +353,19 @@ export default function App() {
               <fieldset disabled={busy}>
                 <div className="buttons">
                   <button
-                    disabled={!past.current.length}
+                    disabled={!corrected || !past.current.length}
                     onClick={() => undo()}
                   >
                     Undo
                   </button>
                   <button
-                    disabled={!future.current.length}
+                    disabled={!corrected || !future.current.length}
                     onClick={() => undo(true)}
                   >
                     Redo
                   </button>
                 </div>
-                <button disabled={!selected} onClick={remove}>
+                <button disabled={!corrected || !selected} onClick={remove}>
                   Delete selected
                 </button>
                 {selectedAnnotation && (
@@ -364,7 +379,7 @@ export default function App() {
                       : ""}
                   </p>
                 )}
-                {mode === "review" && (
+                {mode === "review" && corrected && (
                   <>
                     <h2>Model review</h2>
                     <dl>
@@ -460,12 +475,21 @@ export default function App() {
                     </button>
                   </>
                 )}
+                <h2>Physical normalization</h2>
+                <p>Scale: {normalization?.pixels_per_mm ?? "Loading"} pixels/mm</p>
+                <label>Board profile<select value={boardProfile} onChange={e => {
+                  setBoardProfile(e.target.value);
+                  const profile = normalization?.board_profiles[e.target.value];
+                  if (profile) {setWidthMm(String(profile.physical_width_mm)); setHeightMm(String(profile.physical_height_mm));}
+                }}><option value="">Custom dimensions</option>{Object.keys(normalization?.board_profiles || {}).map(k => <option key={k}>{k}</option>)}</select></label>
+                <label>Board width (mm)<input type="number" min="0.01" step="any" value={widthMm} onChange={e => {setWidthMm(e.target.value); setBoardProfile("");}} /></label>
+                <label>Board height (mm)<input type="number" min="0.01" step="any" value={heightMm} onChange={e => {setHeightMm(e.target.value); setBoardProfile("");}} /></label>
                 <h2>Perspective correction</h2>
                 <label>
                   <input
                     type="checkbox"
                     checked={perspective}
-                    onChange={(e) => setPerspective(e.target.checked)}
+                    onChange={(e) => {setPerspective(e.target.checked); setCorrected(false); select(null);}}
                   />{" "}
                   Place corners
                 </label>
@@ -479,18 +503,19 @@ export default function App() {
                       Reset corners
                     </button>
                     <button
-                      disabled={corners.length !== 4}
+                      disabled={corners.length !== 4 || !normalization || !(Number(widthMm) > 0) || !(Number(heightMm) > 0)}
                       onClick={() =>
                         void run(async () => {
                           await flush();
                           show(
                             await api<Doc>(
                               `/api/images/${doc.image_id}/perspective`,
-                              json({ corners }),
+                              json({ corners, board_profile: boardProfile || null, physical_width_mm: Number(widthMm), physical_height_mm: Number(heightMm) }),
                             ),
                           );
                           past.current = [];
                           future.current = [];
+                          setCorrected(true); setPerspective(false); select(null);
                         })
                       }
                     >
@@ -596,9 +621,11 @@ export default function App() {
               select={select}
               space={space}
               perspective={perspective}
+              corrected={corrected}
               corners={corners}
               setCorners={setCorners}
               add={(p) => {
+                if (!corrected) return;
                 const a = {
                   ...p,
                   id: crypto.randomUUID(),

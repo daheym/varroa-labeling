@@ -4,13 +4,17 @@ from .models import Candidates
 
 
 class Detector(Protocol):
-    """Adapter boundary: outputs must use original, EXIF-oriented image pixels."""
-    def predict(self, image_path: Path, model_version: str) -> Candidates: ...
+    """Receive only the canonical raster. Return canonical points tied to perspective['file'].
+
+    Validate model pixels/mm and input settings against perspective before inference.
+    Never pass the original upload to this adapter.
+    """
+    def predict(self, canonical_image_path: Path, model_version: str, *, perspective: dict) -> Candidates: ...
     def train(self, dataset_path: Path, dataset_version: str) -> str: ...
 
 
 class UnconfiguredDetector:
-    def predict(self, image_path: Path, model_version: str) -> Candidates:
+    def predict(self, canonical_image_path: Path, model_version: str, *, perspective: dict) -> Candidates:
         raise NotImplementedError('No detector configured. Import candidate JSON for review.')
 
     def train(self, dataset_path: Path, dataset_version: str) -> str:
