@@ -14,19 +14,19 @@ def payload(width=15,height=10):
 def test_legacy_migration_and_recorrection_preserve_points(client):
     doc=upload(client,corrected=False)
     doc['annotations']=[dict(id='a',x=59.5,y=39.5,source='human',reviewed=True)]
-    # Simulate existing on-disk original-coordinate data, never edit it through new UI.
+    # Existing original-coordinate data can now be edited and exchanged directly.
     main.path(doc['image_id']).write_text(json.dumps(doc))
     base=f"/api/images/{doc['image_id']}"
-    assert client.put(base+'/annotations',json={**doc,'annotations':[]}).status_code == 409
+    assert client.put(base+'/annotations',json=doc).status_code == 200
     result=client.post(base+'/perspective',json=payload())
     assert result.status_code == 200
     migrated=result.json()
     assert migrated['coordinate_space']=='canonical'
-    assert (migrated['annotations'][0]['x'],migrated['annotations'][0]['y']) == pytest.approx((60,40))
+    assert (migrated['annotations'][0]['x'],migrated['annotations'][0]['y']) == pytest.approx((7.5 * main.NORMALIZATION["pixels_per_mm"], 5 * main.NORMALIZATION["pixels_per_mm"]))
     second=client.post(base+'/perspective',json=payload(30,20)).json()
-    assert (second['annotations'][0]['x'],second['annotations'][0]['y']) == pytest.approx((120,80))
+    assert (second['annotations'][0]['x'],second['annotations'][0]['y']) == pytest.approx((15 * main.NORMALIZATION["pixels_per_mm"], 10 * main.NORMALIZATION["pixels_per_mm"]))
     archives=[json.loads(p.read_text()) for p in (main.ROOT/'history').glob('*.json')]
-    assert doc in archives
+    assert any(a["annotations"][0]["x"] == 59.5 and a["coordinate_space"] == "original" for a in archives)
     assert client.put(base+'/annotations',json=migrated).status_code==409
 
 

@@ -68,6 +68,16 @@ def images():
 
 
 def reset_document(doc):
+    history = ROOT / 'history'
+    history.mkdir(exist_ok=True)
+    (history / f'{doc.image_id}-{uuid.uuid4()}.json').write_text(doc.model_dump_json(indent=2), encoding='utf-8')
+    baseline = ROOT / 'prediction_history' / f'{doc.image_id}.json'
+    if baseline.exists():
+        baseline.replace(history / f'{doc.image_id}-predictions-{uuid.uuid4()}.json')
+    before = ROOT / 'prediction_history' / f'{doc.image_id}.before.json'
+    if before.exists():
+        before.replace(history / f'{doc.image_id}-before-{uuid.uuid4()}.json')
+    doc.review_complete = False
     doc.annotations = []
     doc.rejected_predictions = []
     doc.model_version = None
@@ -149,8 +159,20 @@ def save(image_id: str, doc: Document):
             raise HTTPException(422, 'Image metadata is immutable')
         if doc.coordinate_space != old.coordinate_space or doc.perspective != old.perspective:
             raise HTTPException(409, 'Stale coordinate space or transform; reload image')
-        if doc.coordinate_space != 'canonical' and (doc.annotations != old.annotations or doc.rejected_predictions != old.rejected_predictions):
-            raise HTTPException(409, 'Generate physical correction before editing legacy annotations')
+        # Original-space documents can be reviewed without physical normalization.
+        old_points = {a.id: a for a in old.annotations + old.rejected_predictions}
+        for a in doc.annotations + doc.rejected_predictions:
+            previous = old_points.get(a.id)
+            if previous and previous.source == 'model':
+                if (a.source, a.confidence, a.model_version) != (previous.source, previous.confidence, previous.model_version):
+                    raise HTTPException(422, 'Model provenance is immutable')
+                if (a.x, a.y) != (previous.x, previous.y):
+                    a.reviewed = True
+                    a.bbox = None  # A point correction invalidates the original detection box.
+            if a.source == 'human' and not a.reviewed:
+                raise HTTPException(422, 'Human annotations must be reviewed')
+        if doc.review_complete and any(not a.reviewed for a in doc.annotations):
+            raise HTTPException(422, 'Unreviewed predictions remain')
         doc.perspective = old.perspective
         validate_points(doc)
         write(doc)
@@ -165,12 +187,29 @@ def candidates(image_id: str, payload: Candidates):
             raise HTTPException(409, 'This image already has a prediction batch')
         if doc.coordinate_space != 'canonical' or payload.perspective_file != doc.perspective['file']:
             raise HTTPException(409, 'Candidates must reference the current canonical perspective_file')
+        before = doc.model_dump_json(indent=2)
         for p in payload.annotations:
+            if p.confidence is None:
+                raise HTTPException(422, "Model predictions require confidence")
             p.source = 'model'
             p.reviewed = False
+            p.model_version = payload.model_version
+        doc.review_complete = False
         doc.annotations.extend(payload.annotations)
         doc.model_version = payload.model_version
         validate_points(doc)
+        from .exchange import annotation_document
+        from .interchange import dump, AnnotationFile
+        with Image.open(ROOT / 'images' / f'{image_id}.original') as image:
+            filename = image_id + ('.jpg' if image.format == 'JPEG' else '.png')
+        baseline = annotation_document(doc, filename)
+        ids = {p.id for p in payload.annotations}
+        baseline['annotations'] = [a for a in baseline['annotations'] if a['id'] in ids]
+        try:
+            dump(ROOT / 'prediction_history' / f'{image_id}.json', baseline, AnnotationFile)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        (ROOT / 'prediction_history' / f'{image_id}.before.json').write_text(before, encoding='utf-8')
         write(doc)
         return doc
 
@@ -247,3 +286,36 @@ def train():
 def predict(image_id: str):
     read(image_id)
     raise HTTPException(501, 'Inference is not implemented. Import candidate JSON or connect a Detector adapter.')
+
+
+# Linked directories are deliberately local filesystem operations, like the existing data store.
+from pydantic import BaseModel, Field
+from typing import Literal
+from .exchange import export_bundle, import_predictions, statistics
+
+class ExchangeRequest(BaseModel):
+    directory: str
+    dataset_version: str = Field(default="1", min_length=1)
+    purpose: Literal["ground_truth", "unreviewed"] = "ground_truth"
+    image_ids: list[str] | None = None
+
+@app.post('/api/exchange/export')
+def exchange_export(payload: ExchangeRequest):
+    with lock:
+        try:
+            ids = payload.image_ids if payload.image_ids is not None else [p.stem for p in (ROOT/'annotations').glob('*.json')]
+            return export_bundle(ROOT, [read(i) for i in ids], payload.directory, payload.dataset_version, payload.purpose)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+@app.post('/api/exchange/import')
+def exchange_import(payload: ExchangeRequest):
+    with lock:
+        try:
+            return import_predictions(ROOT, payload.directory, read, write, validate_points)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+@app.get('/api/images/{image_id}/review-statistics')
+def review_statistics(image_id: str):
+    return statistics(ROOT, read(image_id))

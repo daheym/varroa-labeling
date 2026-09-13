@@ -21,6 +21,7 @@ type Props = {
   corrected: boolean;
 };
 export default function Canvas(p: Props) {
+  const editable = p.corrected || p.doc.coordinate_space === "original";
   const width = p.corrected ? p.doc.perspective!.width : p.doc.original_width;
   const height = p.corrected ? p.doc.perspective!.height : p.doc.original_height;
   const container = useRef<HTMLDivElement>(null);
@@ -114,7 +115,7 @@ export default function Canvas(p: Props) {
             return;
           if (p.perspective) {
             if (p.corners.length < 4) p.setCorners([...p.corners, point]);
-          } else if (p.corrected) p.add(point);
+          } else if (editable) p.add(point);
         }}
       >
         <Layer>
@@ -126,7 +127,7 @@ export default function Canvas(p: Props) {
           />
         </Layer>
         <Layer>
-          {p.corrected &&
+          {editable &&
             p.doc.annotations.map((a) => (
               <Circle
                 key={a.id}
@@ -152,7 +153,7 @@ export default function Canvas(p: Props) {
                     : undefined
                 }
                 hitStrokeWidth={12 / view.scale}
-                draggable={!p.space}
+                draggable={!p.space && !p.perspective}
                 onClick={(e) => {
                   e.cancelBubble = true;
                   p.select(a.id);

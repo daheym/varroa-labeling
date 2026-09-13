@@ -3,10 +3,14 @@ export type Annotation = Point & {
   id: string;
   className: "varroa";
   source: "human" | "model";
-  confidence?: number;
+  confidence?: number | null;
   reviewed: boolean;
+  model_version?: string | null;
+  bbox?: {x: number; y: number; width: number; height: number} | null;
 };
 export type Doc = {
+  schema_version: "1.0";
+  review_complete: boolean;
   image_id: string;
   filename: string;
   original_width: number;
@@ -22,4 +26,21 @@ export type Doc = {
   annotations: Annotation[];
   rejected_predictions: Annotation[];
   effort: Record<string, number>;
+};
+
+// Mirror schemas/varroa-annotation-v1.schema.json. Runtime validation is server-side.
+export type ExchangeAnnotation = Omit<Annotation, "className" | "confidence" | "model_version"> & {
+  class: "varroa"; confidence: number | null; model_version: string | null;
+};
+export type ExchangeDocument = {
+  schema_version: "1.0";
+  image: {id: string; filename: string; width: number; height: number};
+  perspective: Record<string, unknown> | null;
+  annotations: ExchangeAnnotation[];
+};
+export type ExchangeManifest = {
+  schema_version: "1.0"; dataset_version: string; created_at: string;
+  purpose: "ground_truth" | "predictions" | "unreviewed";
+  reviewed_image_ids: string[];
+  images: {id: string; filename: string; annotation_file: string}[];
 };

@@ -6,3 +6,6 @@ opencv-python-headless>=4.10
 numpy>=2
 pytest>=8
 httpx>=0.28
+
+jsonschema>=4.23,<5
+pydantic>=2.10,<3

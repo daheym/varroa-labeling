@@ -91,3 +91,8 @@ npm run build
 The production build goes to `frontend/dist`. Vite's development proxy is not embedded in the build: production hosting must route `/api` to FastAPI. The documented local workflow uses the Vite dev server.
 
 Normalization configuration: `normalization.json`, optionally overridden with `VARROA_NORMALIZATION_CONFIG`. The server owns the common scale; each image supplies its physical dimensions. Successful recorrections archive prior JSON in `data/history/`. Restart the backend after changing configuration.
+
+## Active-learning interchange
+
+Export reviewed datasets and exchange model predictions through portable or linked directories.
+See [the end-to-end workflow](docs/active-learning.md), [v1 JSON Schema](schemas/varroa-annotation-v1.schema.json), and [example files](examples/interchange).

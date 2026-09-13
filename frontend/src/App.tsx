@@ -27,6 +27,10 @@ export default function App() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const [corrected, setCorrected] = useState(false);
+  const editable = corrected || doc?.coordinate_space === "original";
+  const [exchangeDirectory, setExchangeDirectory] = useState("");
+  const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
+  const [reviewStats, setReviewStats] = useState<Record<string, number | string> | null>(null);
   const [normalization, setNormalization] = useState<{pixels_per_mm: number; board_profiles: Record<string, {physical_width_mm: number; physical_height_mm: number}>}>();
   const [boardProfile, setBoardProfile] = useState("");
   const [widthMm, setWidthMm] = useState("");
@@ -86,6 +90,7 @@ export default function App() {
     lastAction.current = Date.now();
     d = {
       ...d,
+      review_complete: action ? false : d.review_complete,
       effort: {
         ...d.effort,
         active_seconds: d.effort.active_seconds + elapsed,
@@ -115,7 +120,7 @@ export default function App() {
   }
   function remove() {
     const d = current.current;
-    if (!d || !selected || !corrected) return;
+    if (!d || !selected || !(corrected || d.coordinate_space === "original")) return;
     const a = d.annotations.find((a) => a.id === selected);
     if (!a) return;
     commit(
@@ -154,7 +159,8 @@ export default function App() {
     setWidthMm(String(d.perspective?.physical_width_mm || ""));
     setHeightMm(String(d.perspective?.physical_height_mm || ""));
     setCorrected(d.coordinate_space === "canonical");
-    setPerspective(d.coordinate_space !== "canonical");
+    setPerspective(false);
+    setReviewStats(null);
     lastAction.current = Date.now();
   }
   async function resetAnnotations(all: boolean) {
@@ -222,7 +228,7 @@ export default function App() {
         e.preventDefault();
         setSpace(true);
       }
-      if (busy || !corrected) return;
+      if (busy || !editable) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undo(e.shiftKey);
@@ -353,19 +359,19 @@ export default function App() {
               <fieldset disabled={busy}>
                 <div className="buttons">
                   <button
-                    disabled={!corrected || !past.current.length}
+                    disabled={!editable || !past.current.length}
                     onClick={() => undo()}
                   >
                     Undo
                   </button>
                   <button
-                    disabled={!corrected || !future.current.length}
+                    disabled={!editable || !future.current.length}
                     onClick={() => undo(true)}
                   >
                     Redo
                   </button>
                 </div>
-                <button disabled={!corrected || !selected} onClick={remove}>
+                <button disabled={!editable || !selected} onClick={remove}>
                   Delete selected
                 </button>
                 {selectedAnnotation && (
@@ -379,7 +385,7 @@ export default function App() {
                       : ""}
                   </p>
                 )}
-                {mode === "review" && corrected && (
+                {mode === "review" && editable && (
                   <>
                     <h2>Model review</h2>
                     <dl>
@@ -579,6 +585,39 @@ export default function App() {
               </fieldset>
             </>
           )}
+          <h2>Dataset exchange</h2>
+          <label>Linked folder (server path)<input value={exchangeDirectory} onChange={e => setExchangeDirectory(e.target.value)} placeholder="F:/ImkerApp/exports/dataset-v1" /></label>
+          <label>Export version<input value={exchangeVersion} onChange={e => setExchangeVersion(e.target.value)} /></label>
+          {doc && <>
+            <button disabled={busy || doc.annotations.some(a => !a.reviewed)} onClick={() => void run(async () => {
+              commit({...doc, review_complete: true}); await flush();
+              setReviewStats(await api<Record<string, number | string>>(`/api/images/${doc.image_id}/review-statistics`));
+            })}>Finish image review (including empty images)</button>
+            <p>{doc.review_complete ? "Image review complete" : "Image review incomplete"}</p>
+          </>}
+          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
+            await flush();
+            const documents = await api<Doc[]>("/api/images");
+            await api("/api/exchange/export", json({directory: exchangeDirectory, dataset_version: exchangeVersion,
+              purpose: "ground_truth", image_ids: documents.filter(d => d.review_complete).map(d => d.image_id)}));
+            setStatus("Reviewed dataset exported");
+          })}>Export completed images as ground truth</button>
+          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
+            await flush();
+            const documents = await api<Doc[]>("/api/images");
+            await api("/api/exchange/export", json({directory: exchangeDirectory, dataset_version: exchangeVersion,
+              purpose: "unreviewed", image_ids: documents.filter(d => !d.review_complete).map(d => d.image_id)}));
+            setStatus("Unreviewed images exported for prediction");
+          })}>Export unreviewed images for prediction</button>
+          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
+            await flush();
+            await api("/api/exchange/import", json({directory: exchangeDirectory}));
+            setList(await api<Doc[]>("/api/images"));
+            if (doc) await load(doc.image_id);
+            setMode("review");
+            setStatus("Predictions imported");
+          })}>Import prediction directory</button>
+          {reviewStats && <details open><summary>Review statistics</summary>{Object.entries(reviewStats).filter(([k]) => !["schema_version", "image_id"].includes(k)).map(([k,v]) => <div key={k}>{k.replaceAll("_", " ")}: {v}</div>)}</details>}
           <h2>Reset annotations</h2>
           <p>
             Permanent. Also clears prediction reviews and effort statistics.
@@ -625,7 +664,7 @@ export default function App() {
               corners={corners}
               setCorners={setCorners}
               add={(p) => {
-                if (!corrected) return;
+                if (!editable) return;
                 const a = {
                   ...p,
                   id: crypto.randomUUID(),
@@ -644,7 +683,7 @@ export default function App() {
                   {
                     ...doc,
                     annotations: doc.annotations.map((a) =>
-                      a.id === id ? { ...a, ...p, reviewed: true } : a,
+                      a.id === id ? { ...a, ...p, bbox: null, reviewed: true } : a,
                     ),
                   },
                   "moves",

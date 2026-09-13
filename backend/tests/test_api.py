@@ -41,7 +41,7 @@ def test_review_persistence_and_export(client):
     assert client.put(base+'/annotations', json=doc).status_code == 200
     assert client.get(base+'/export').json()['model_version'] == 'detector-v1'
     assert json.loads(main.path(doc['image_id']).read_text())['annotations'][0]['x'] == 10.5
-    doc['annotations'][0]['x'] = 120
+    doc['annotations'][0]['x'] = doc['perspective']['output_width']
     assert client.put(base+'/annotations', json=doc).status_code == 422
     assert client.post(base+'/candidates', json={'model_version': 'v2', 'coordinate_space':'canonical', 'perspective_file':doc['perspective']['file'], 'annotations': []}).status_code == 409
 

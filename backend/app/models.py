@@ -14,6 +14,8 @@ class Annotation(Point):
     source: Literal['human', 'model']
     confidence: float | None = Field(default=None, ge=0, le=1)
     reviewed: bool = False
+    model_version: str | None = None
+    bbox: dict | None = None
 
 
 class Effort(BaseModel):
@@ -28,6 +30,8 @@ class Effort(BaseModel):
 
 class Document(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    schema_version: Literal['1.0'] = '1.0'
+    review_complete: bool = False
     image_id: str
     filename: str
     original_width: int
