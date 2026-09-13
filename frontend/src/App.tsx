@@ -180,14 +180,14 @@ export default function App() {
     if (all) {
       if (
         window.prompt(
-          "Permanently reset annotations for ALL images? This clears human annotations, predictions, review records, model versions and effort statistics. Images and perspective corrections are kept. This cannot be undone. Type RESET ALL to continue.",
+          "Permanently reset ALL annotations? This clears human and model annotations, rejected predictions, review status, model provenance, and effort statistics for every image. Images, perspective corrections, and dataset versions are kept. This cannot be undone. Type RESET ALL to continue.",
         ) !== "RESET ALL"
       )
         return;
     } else if (
       !current.current ||
       !window.confirm(
-        `Permanently reset annotations for "${current.current.filename}"? Predictions, review records, model version and effort statistics will also be cleared. Images and perspective corrections are kept. This cannot be undone.`,
+        `Permanently reset annotations for "${current.current.filename}"? Human and model annotations, rejected predictions, review status, model provenance, and effort statistics will be cleared. Images, perspective corrections, and dataset version are kept. This cannot be undone.`,
       )
     )
       return;
@@ -199,19 +199,11 @@ export default function App() {
           "/api/annotations/reset-all",
           json({ confirmation: "RESET ALL" }),
         );
-        // Clear history immediately, even if the subsequent refresh fails.
         past.current = [];
         future.current = [];
-        if (current.current)
-          show({
-            ...current.current,
-            annotations: [],
-            rejected_predictions: [],
-            model_version: null,
-            effort: Object.fromEntries(
-              Object.keys(current.current.effort).map((k) => [k, 0]),
-            ),
-          });
+        if (current.current) {
+          show(await api<Doc>(`/api/images/${current.current.image_id}`));
+        }
       } else if (current.current) {
         show(
           await api<Doc>(
@@ -223,6 +215,7 @@ export default function App() {
         future.current = [];
       }
       select(null);
+      setReviewStats(null);
       lastAction.current = Date.now();
       setStatus("Saved");
       setList(await api<Doc[]>("/api/images"));
@@ -347,18 +340,190 @@ export default function App() {
           {doc && (
             <>
               <p>
-                {doc.original_width} × {doc.original_height} original pixels
+                {doc.original_width} x {doc.original_height} original pixels
               </p>
-                <h2>Image view</h2>
-                <button disabled={busy} aria-pressed={!corrected} onClick={() => {setCorrected(false); select(null); setPerspective(true);}}>Original</button>
-                <button aria-pressed={corrected} disabled={busy || doc.coordinate_space !== "canonical"} onClick={() => {setCorrected(true); setPerspective(false); select(null);}}>Corrected</button>
-                {doc.coordinate_space !== "canonical" && <p>Corrected annotations unavailable. Define the board dimensions and generate correction. Legacy points will be migrated.</p>}
-                {doc.perspective?.quality_warning && <p role="alert">{doc.perspective.quality_warning}</p>}
+              <details
+                className="sidebar-section"
+                open={doc.coordinate_space !== "canonical"}
+              >
+                <summary>Image setup and correction</summary>
+              <h3>Image view</h3>
+              <div className="buttons">
+                <button
+                  disabled={busy}
+                  aria-pressed={!corrected}
+                  onClick={() => {
+                    setCorrected(false);
+                    setPerspective(false);
+                    select(null);
+                  }}
+                >
+                  Original
+                </button>
+                <button
+                  aria-pressed={corrected}
+                  disabled={busy || doc.coordinate_space !== "canonical"}
+                  onClick={() => {
+                    setCorrected(true);
+                    setPerspective(false);
+                    select(null);
+                  }}
+                >
+                  Corrected
+                </button>
+              </div>
+              <p>
+                Original shows the uploaded photo. Corrected shows the
+                perspective-adjusted board at the configured physical scale.
+                Edit annotations in Corrected view when physical correction is
+                available.
+              </p>
+              {doc.coordinate_space !== "canonical" && (
+                <p>
+                  This image still uses original-pixel coordinates. Generate a
+                  correction to map existing annotations to the corrected image;
+                  check their positions afterward.
+                </p>
+              )}
+              {doc.perspective?.quality_warning && (
+                <p role="alert">{doc.perspective.quality_warning}</p>
+              )}
+
+              <h3>Physical normalization</h3>
+              <p>
+                Scale: {normalization?.pixels_per_mm ?? "Loading"} pixels/mm.
+                Board width and height describe the physical board boundary.
+              </p>
+              <label>
+                Board profile
+                <select
+                  value={boardProfile}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setBoardProfile(e.target.value);
+                    const profile = normalization?.board_profiles[e.target.value];
+                    if (profile) {
+                      setWidthMm(String(profile.physical_width_mm));
+                      setHeightMm(String(profile.physical_height_mm));
+                    }
+                  }}
+                >
+                  <option value="">Custom dimensions</option>
+                  {Object.keys(normalization?.board_profiles || {}).map((key) => (
+                    <option key={key}>{key}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Board width (mm)
+                <input
+                  type="number"
+                  min="0.01"
+                  step="any"
+                  value={widthMm}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setWidthMm(e.target.value);
+                    setBoardProfile("");
+                  }}
+                />
+              </label>
+              <label>
+                Board height (mm)
+                <input
+                  type="number"
+                  min="0.01"
+                  step="any"
+                  value={heightMm}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setHeightMm(e.target.value);
+                    setBoardProfile("");
+                  }}
+                />
+              </label>
+
+              <h3>Perspective correction</h3>
+              <p>
+                In the original view, mark the board boundary in top-left,
+                top-right, bottom-right, bottom-left order. The top edge is the
+                width; the right edge is the height. Click to place corners and
+                drag to refine them.
+              </p>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={perspective}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setPerspective(e.target.checked);
+                    setCorrected(false);
+                    select(null);
+                  }}
+                />{" "}
+                Place corners
+              </label>
+              {perspective && (
+                <>
+                  <button disabled={busy} onClick={() => setCorners([])}>
+                    Clear corner points
+                  </button>
+                  <button
+                    disabled={
+                      busy ||
+                      corners.length !== 4 ||
+                      !normalization ||
+                      !(Number(widthMm) > 0) ||
+                      !(Number(heightMm) > 0)
+                    }
+                    onClick={() =>
+                      void run(async () => {
+                        await flush();
+                        show(
+                          await api<Doc>(
+                            `/api/images/${doc.image_id}/perspective`,
+                            json({
+                              corners,
+                              board_profile: boardProfile || null,
+                              physical_width_mm: Number(widthMm),
+                              physical_height_mm: Number(heightMm),
+                            }),
+                          ),
+                        );
+                        past.current = [];
+                        future.current = [];
+                        setCorrected(true);
+                        setPerspective(false);
+                        select(null);
+                      })
+                    }
+                  >
+                    Generate corrected image
+                  </button>
+                  <p>
+                    Corner edits are drafts until generation succeeds. This maps
+                    existing annotations into corrected-image coordinates.
+                  </p>
+                </>
+              )}
+              {doc.perspective && (
+                <a
+                  href={`/api/images/${doc.image_id}/corrected`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open corrected image file
+                </a>
+              )}
+              </details>
+
+              <details className="sidebar-section" open>
+                <summary>Annotations ({doc.annotations.length})</summary>
               <label>
                 Annotation mode
                 <select value={mode} onChange={(e) => setMode(e.target.value)}>
-                  <option value="manual">Manual Mode</option>
-                  <option value="review">Model Review Mode</option>
+                  <option value="manual">Manual mode</option>
+                  <option value="review">Model review mode</option>
                 </select>
               </label>
               <div className="count">
@@ -366,11 +531,18 @@ export default function App() {
                 <small>current annotations</small>
               </div>
               <div className="legend">
-                ● Green: reviewed / human
-                <br />◌ Blue: unreviewed model
-                <br />○ White: selected
+                Green: human or reviewed prediction
+                <br />
+                Blue: unreviewed prediction
+                <br />
+                White: selected annotation
               </div>
               <fieldset disabled={busy}>
+                <p>
+                  In an editable view, click the image to add a human annotation
+                  and drag a marker to move it. Deleting a model marker rejects
+                  that prediction.
+                </p>
                 <div className="buttons">
                   <button
                     disabled={!editable || !past.current.length}
@@ -393,15 +565,16 @@ export default function App() {
                     Selected: {selectedAnnotation.x.toFixed(2)},{" "}
                     {selectedAnnotation.y.toFixed(2)}
                     <br />
-                    {selectedAnnotation.source}
+                    Type: {selectedAnnotation.source}
                     {selectedAnnotation.confidence != null
-                      ? ` · ${(selectedAnnotation.confidence * 100).toFixed(1)}%`
+                      ? `; confidence ${(selectedAnnotation.confidence * 100).toFixed(1)}%`
                       : ""}
                   </p>
                 )}
                 {mode === "review" && editable && (
                   <>
-                    <h2>Model review</h2>
+                    <details className="sidebar-subsection" open>
+                      <summary>Model review</summary>
                     <dl>
                       <dt>Total predictions</dt>
                       <dd>{model.length + doc.rejected_predictions.length}</dd>
@@ -411,37 +584,10 @@ export default function App() {
                       <dd>{doc.rejected_predictions.length}</dd>
                       <dt>Manually added</dt>
                       <dd>
-                        {
-                          doc.annotations.filter((a) => a.source === "human")
-                            .length
-                        }
+                        {doc.annotations.filter((a) => a.source === "human").length}
                       </dd>
                     </dl>
-                    <p>Model: {doc.model_version || "No prediction batch"}</p>
-                    <label>
-                      Import candidate JSON
-                      <input
-                        type="file"
-                        accept="application/json,.json"
-                        disabled={!!doc.model_version}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (!f) return;
-                          void run(async () => {
-                            const payload = JSON.parse(await f.text());
-                            await flush();
-                            const updated = await api<Doc>(
-                              `/api/images/${doc.image_id}/candidates`,
-                              json(payload),
-                            );
-                            show(updated);
-                            past.current = [];
-                            future.current = [];
-                          });
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
+                    <p>Prediction batch: {doc.model_version || "None"}</p>
                     <label>
                       Trained model
                       <select
@@ -450,23 +596,24 @@ export default function App() {
                         onChange={(e) => setSelectedModel(e.target.value)}
                       >
                         <option value="">Select a trained model</option>
-                        {trainedModels.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
+                        {trainedModels.map((trainedModel) => (
+                          <option key={trainedModel.id} value={trainedModel.id}>
+                            {trainedModel.label}
                           </option>
                         ))}
                       </select>
                     </label>
                     <div className="buttons">
-                      <button
-                        type="button"
-                        onClick={() => void run(refreshModels)}
-                      >
+                      <button type="button" onClick={() => void run(refreshModels)}>
                         Refresh model list
                       </button>
                       <button
                         type="button"
-                        disabled={!selectedModel || !!doc.model_version || doc.coordinate_space !== "canonical"}
+                        disabled={
+                          !selectedModel ||
+                          !!doc.model_version ||
+                          doc.coordinate_space !== "canonical"
+                        }
                         onClick={() =>
                           void run(async () => {
                             await flush();
@@ -487,16 +634,19 @@ export default function App() {
                     </div>
                     {trainedModels.length === 0 && modelStatus !== "loading" && (
                       <p role="status">
-                        No compatible trained models found ({modelStatus}). Check the training repository and its model preprocessing files, then refresh.
+                        No compatible trained models found ({modelStatus}). Check
+                        the training repository and preprocessing files, then
+                        refresh the list.
                       </p>
                     )}
                     {doc.coordinate_space !== "canonical" && (
-                      <p>Generate physical perspective correction before requesting predictions.</p>
+                      <p>
+                        Generate physical perspective correction before
+                        requesting predictions.
+                      </p>
                     )}
                     <button
-                      disabled={
-                        !selectedAnnotation || selectedAnnotation.reviewed
-                      }
+                      disabled={!selectedAnnotation || selectedAnnotation.reviewed}
                       onClick={() =>
                         commit(
                           {
@@ -509,14 +659,12 @@ export default function App() {
                         )
                       }
                     >
-                      Accept selected
+                      Accept selected prediction
                     </button>
                     <button
                       disabled={!doc.annotations.some((a) => !a.reviewed)}
                       onClick={() => {
-                        const n = doc.annotations.filter(
-                          (a) => !a.reviewed,
-                        ).length;
+                        const n = doc.annotations.filter((a) => !a.reviewed).length;
                         commit({
                           ...doc,
                           annotations: doc.annotations.map((a) => ({
@@ -530,151 +678,175 @@ export default function App() {
                         });
                       }}
                     >
-                      Mark all reviewed
+                      Accept all remaining predictions
                     </button>
-                  </>
-                )}
-                <h2>Physical normalization</h2>
-                <p>Scale: {normalization?.pixels_per_mm ?? "Loading"} pixels/mm</p>
-                <label>Board profile<select value={boardProfile} onChange={e => {
-                  setBoardProfile(e.target.value);
-                  const profile = normalization?.board_profiles[e.target.value];
-                  if (profile) {setWidthMm(String(profile.physical_width_mm)); setHeightMm(String(profile.physical_height_mm));}
-                }}><option value="">Custom dimensions</option>{Object.keys(normalization?.board_profiles || {}).map(k => <option key={k}>{k}</option>)}</select></label>
-                <label>Board width (mm)<input type="number" min="0.01" step="any" value={widthMm} onChange={e => {setWidthMm(e.target.value); setBoardProfile("");}} /></label>
-                <label>Board height (mm)<input type="number" min="0.01" step="any" value={heightMm} onChange={e => {setHeightMm(e.target.value); setBoardProfile("");}} /></label>
-                <h2>Perspective correction</h2>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={perspective}
-                    onChange={(e) => {setPerspective(e.target.checked); setCorrected(false); select(null);}}
-                  />{" "}
-                  Place corners
-                </label>
-                {perspective && (
-                  <>
                     <p>
-                      Click in order: top-left, top-right, bottom-right,
-                      bottom-left. Drag to refine.
+                      Deleting an unreviewed prediction rejects it. Finish image
+                      review separately after checking the whole image.
                     </p>
-                    <button onClick={() => setCorners([])}>
-                      Reset corners
-                    </button>
-                    <button
-                      disabled={corners.length !== 4 || !normalization || !(Number(widthMm) > 0) || !(Number(heightMm) > 0)}
-                      onClick={() =>
-                        void run(async () => {
-                          await flush();
-                          show(
-                            await api<Doc>(
-                              `/api/images/${doc.image_id}/perspective`,
-                              json({ corners, board_profile: boardProfile || null, physical_width_mm: Number(widthMm), physical_height_mm: Number(heightMm) }),
-                            ),
-                          );
-                          past.current = [];
-                          future.current = [];
-                          setCorrected(true); setPerspective(false); select(null);
-                        })
-                      }
-                    >
-                      Generate corrected image
-                    </button>
+                    </details>
                   </>
                 )}
-                {doc.perspective && (
-                  <a
-                    href={`/api/images/${doc.image_id}/corrected`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open corrected image ↗
-                  </a>
-                )}
-                <h2>Dataset</h2>
-                <label>
-                  Dataset version
-                  <input
-                    value={doc.dataset_version}
-                    onChange={(e) =>
-                      commit({ ...doc, dataset_version: e.target.value })
-                    }
-                  />
-                </label>
-                <button
-                  onClick={() =>
-                    void run(async () => {
-                      await flush();
-                      const exported = await api<Doc>(
-                        `/api/images/${doc.image_id}/export`,
-                      );
-                      const url = URL.createObjectURL(
-                        new Blob([JSON.stringify(exported, null, 2)], {
-                          type: "application/json",
-                        }),
-                      );
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = `${doc.image_id}.ground-truth.json`;
-                      a.click();
-                      setTimeout(() => URL.revokeObjectURL(url), 1000);
-                    })
-                  }
-                >
-                  Export reviewed ground truth
-                </button>
                 <p>
-                  {doc.annotations.filter((a) => !a.reviewed).length} awaiting
-                  review
+                  {doc.annotations.filter((a) => !a.reviewed).length} annotations
+                  awaiting review
                 </p>
                 <details>
                   <summary>Annotation effort</summary>
-                  {Object.entries(doc.effort).map(([k, v]) => (
-                    <div key={k}>
-                      {k.replaceAll("_", " ")}: {Math.round(v)}
+                  {Object.entries(doc.effort).map(([key, value]) => (
+                    <div key={key}>
+                      {key.replaceAll("_", " ")}: {Math.round(value)}
                     </div>
                   ))}
                 </details>
               </fieldset>
+              </details>
             </>
           )}
-          <h2>Dataset exchange</h2>
-          <label>Linked folder (server path)<input value={exchangeDirectory} onChange={e => setExchangeDirectory(e.target.value)} placeholder="F:/ImkerApp/exports/dataset-v1" /></label>
-          <label>Export version<input value={exchangeVersion} onChange={e => setExchangeVersion(e.target.value)} /></label>
-          {doc && <>
-            <button disabled={busy || doc.annotations.some(a => !a.reviewed)} onClick={() => void run(async () => {
-              commit({...doc, review_complete: true}); await flush();
-              setReviewStats(await api<Record<string, number | string>>(`/api/images/${doc.image_id}/review-statistics`));
-            })}>Finish image review (including empty images)</button>
-            <p>{doc.review_complete ? "Image review complete" : "Image review incomplete"}</p>
-          </>}
-          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
-            await flush();
-            const documents = await api<Doc[]>("/api/images");
-            await api("/api/exchange/export", json({directory: exchangeDirectory, dataset_version: exchangeVersion,
-              purpose: "ground_truth", image_ids: documents.filter(d => d.review_complete).map(d => d.image_id)}));
-            setStatus("Reviewed dataset exported");
-          })}>Export completed images as ground truth</button>
-          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
-            await flush();
-            const documents = await api<Doc[]>("/api/images");
-            await api("/api/exchange/export", json({directory: exchangeDirectory, dataset_version: exchangeVersion,
-              purpose: "unreviewed", image_ids: documents.filter(d => !d.review_complete).map(d => d.image_id)}));
-            setStatus("Unreviewed images exported for prediction");
-          })}>Export unreviewed images for prediction</button>
-          <button disabled={busy || !exchangeDirectory} onClick={() => void run(async () => {
-            await flush();
-            await api("/api/exchange/import", json({directory: exchangeDirectory}));
-            setList(await api<Doc[]>("/api/images"));
-            if (doc) await load(doc.image_id);
-            setMode("review");
-            setStatus("Predictions imported");
-          })}>Import prediction directory</button>
-          {reviewStats && <details open><summary>Review statistics</summary>{Object.entries(reviewStats).filter(([k]) => !["schema_version", "image_id"].includes(k)).map(([k,v]) => <div key={k}>{k.replaceAll("_", " ")}: {v}</div>)}</details>}
-          <h2>Reset annotations</h2>
+          <details className="sidebar-section">
+            <summary>Dataset exchange</summary>
+          <label>
+            Folder path on API server
+            <input
+              value={exchangeDirectory}
+              onChange={(e) => setExchangeDirectory(e.target.value)}
+              placeholder="F:/ImkerApp/exports/dataset-v1"
+            />
+          </label>
           <p>
-            Permanent. Also clears prediction reviews and effort statistics.
-            Keeps images and perspective corrections.
+            Exports require a new folder outside app data. Imports read an
+            existing prediction bundle from this path. The API server accesses
+            the folder, not this browser.
+          </p>
+          <label>
+            Dataset version
+            <input
+              value={exchangeVersion}
+              onChange={(e) => setExchangeVersion(e.target.value)}
+            />
+          </label>
+          <p>This version is written to the exported dataset manifest.</p>
+          {doc && (
+            <>
+              <button
+                disabled={busy || doc.annotations.some((a) => !a.reviewed)}
+                onClick={() =>
+                  void run(async () => {
+                    commit({ ...doc, review_complete: true });
+                    await flush();
+                    setReviewStats(
+                      await api<Record<string, number | string>>(
+                        `/api/images/${doc.image_id}/review-statistics`,
+                      ),
+                    );
+                  })
+                }
+              >
+                Finish image review
+              </button>
+              <p>
+                {doc.review_complete
+                  ? "Image review complete"
+                  : "Image review incomplete"}
+                . Mark empty images complete too; they are valid negatives for
+                training.
+              </p>
+            </>
+          )}
+          <button
+            disabled={busy || !exchangeDirectory}
+            onClick={() =>
+              void run(async () => {
+                await flush();
+                const documents = await api<Doc[]>("/api/images");
+                await api(
+                  "/api/exchange/export",
+                  json({
+                    directory: exchangeDirectory,
+                    dataset_version: exchangeVersion,
+                    purpose: "ground_truth",
+                    image_ids: documents
+                      .filter((image) => image.review_complete)
+                      .map((image) => image.image_id),
+                  }),
+                );
+                setStatus("Reviewed dataset exported");
+              })
+            }
+          >
+            Export completed images as ground truth
+          </button>
+          <button
+            disabled={busy || !exchangeDirectory}
+            onClick={() =>
+              void run(async () => {
+                await flush();
+                const documents = await api<Doc[]>("/api/images");
+                await api(
+                  "/api/exchange/export",
+                  json({
+                    directory: exchangeDirectory,
+                    dataset_version: exchangeVersion,
+                    purpose: "unreviewed",
+                    image_ids: documents
+                      .filter(
+                        (image) =>
+                          !image.review_complete && image.model_version === null,
+                      )
+                      .map((image) => image.image_id),
+                  }),
+                );
+                setStatus("Images without predictions exported");
+              })
+            }
+          >
+            Export images without predictions
+          </button>
+          <p>
+            This includes images that are not marked complete and do not already
+            have a prediction batch.
+          </p>
+          <button
+            disabled={busy || !exchangeDirectory}
+            onClick={() =>
+              void run(async () => {
+                await flush();
+                await api(
+                  "/api/exchange/import",
+                  json({ directory: exchangeDirectory }),
+                );
+                setList(await api<Doc[]>("/api/images"));
+                if (doc) await load(doc.image_id);
+                setMode("review");
+                setStatus("Predictions imported");
+              })
+            }
+          >
+            Import prediction directory
+          </button>
+          <p>
+            The directory must contain predictions for matching image IDs. An
+            image can receive one prediction batch until its annotations are reset.
+          </p>
+          {reviewStats && (
+            <details open>
+              <summary>Review statistics</summary>
+              {Object.entries(reviewStats)
+                .filter(([key]) => !["schema_version", "image_id"].includes(key))
+                .map(([key, value]) => (
+                  <div key={key}>{key.replaceAll("_", " ")}: {value}</div>
+                ))}
+            </details>
+          )}
+          </details>
+
+          <details className="sidebar-section">
+            <summary>Reset annotations</summary>
+          <p>
+            Permanent and cannot be undone. Clears human and model annotations,
+            rejected predictions, review status, model provenance, and effort
+            statistics. Keeps uploaded images, perspective corrections, and
+            dataset version.
           </p>
           <button
             className="danger"
@@ -688,19 +860,23 @@ export default function App() {
             disabled={busy || list.length === 0}
             onClick={() => void resetAnnotations(true)}
           >
-            Reset ALL annotations…
+            Reset ALL annotations...
           </button>
+          </details>
+          <details className="sidebar-section">
+            <summary>Annotation shortcuts</summary>
           <p className="help">
-            Click to add · drag marker to correct
+            Click image: add annotation
             <br />
-            Wheel: zoom · Space + drag: pan
+            Drag marker: move annotation
             <br />
-            Ctrl/Cmd+Z: undo
+            Mouse wheel: zoom; Space + drag: pan
             <br />
-            Ctrl/Cmd+Shift+Z: redo
+            Ctrl/Cmd+Z: undo; Ctrl/Cmd+Shift+Z: redo
             <br />
-            Delete/Backspace: delete
+            Delete/Backspace: delete selected
           </p>
+          </details>
         </aside>
         <section
           className="canvas-panel"

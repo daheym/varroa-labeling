@@ -74,6 +74,10 @@ button {
   cursor: pointer;
   margin: 4px 0;
 }
+aside button {
+  display: block;
+  width: 100%;
+}
 button:hover:enabled {
   background: #3b5065;
 }
@@ -91,16 +95,24 @@ fieldset > button {
 }
 .buttons {
   display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 .buttons button {
-  flex: 1;
+  flex: none;
+  width: 100%;
 }
 h2 {
   font-size: 14px;
   border-top: 1px solid #43505d;
   padding-top: 18px;
   margin-top: 22px;
+}
+h3 {
+  font-size: 13px;
+  border-top: 1px solid #43505d;
+  padding-top: 14px;
+  margin-top: 18px;
 }
 p {
   color: #aab8c7;
@@ -181,6 +193,31 @@ a {
 details {
   font-size: 12px;
   line-height: 1.8;
+}
+details.sidebar-section,
+details.sidebar-subsection {
+  font-size: 14px;
+  line-height: 1.5;
+}
+details.sidebar-section {
+  border-top: 1px solid #43505d;
+  margin-top: 18px;
+  padding-top: 14px;
+}
+details.sidebar-section > summary,
+details.sidebar-subsection > summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style-position: inside;
+}
+details.sidebar-section[open] > summary {
+  margin-bottom: 10px;
+}
+details.sidebar-subsection {
+  margin: 10px 0;
+}
+details.sidebar-subsection > summary {
+  color: #c6d2df;
 }
 @media (max-width: 650px) {
   aside {

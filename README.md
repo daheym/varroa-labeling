@@ -1,6 +1,6 @@
 # Varroa annotation tool
 
-Local React + TypeScript + Vite / FastAPI annotation workspace. No inference or training is implemented. Requires Python 3.11+ and Node.js 20.19+ (Node 22+ recommended).
+Local React + TypeScript + Vite / FastAPI annotation workspace. Inference can be delegated to the sibling `varroa-training` repository; training is performed there. Requires Python 3.11+ and Node.js 20.19+ (Node 22+ recommended).
 
 ## Setup
 
@@ -29,24 +29,11 @@ For the exact tested Python dependencies use `backend/requirements-lock.txt`; th
 1. Upload a JPEG/PNG or select a previously uploaded image.
 2. First complete physical perspective correction (step 5). In Corrected view and Manual Mode, click to add a reviewed human annotation. Click markers to select; drag to correct coordinates; Delete/Backspace removes the selection.
 3. Wheel zooms around the pointer. Hold Space while dragging to pan. Fit image resets the view. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z redoes. History retains 100 edits within the current image session.
-4. Model Review Mode accepts candidate JSON using the format below. Blue dashed markers are unreviewed model candidates; green markers are human or reviewed. Accept selected, drag to correct (also marks reviewed), delete to reject, and click the image to add missed mites. Model provenance is preserved when correcting a prediction. Mark all reviewed explicitly confirms every remaining candidate.
+4. In Model Review mode, request predictions from a compatible trained model or import a prediction directory through Dataset exchange. Blue dashed markers are unreviewed predictions; green markers are human or reviewed predictions. Accept a prediction, drag it to correct its position, delete it to reject it, or click the image to add a missed mite. Finish image review separately after checking the whole image.
 5. In **Original** view select a board profile or enter its physical width/height in mm. Place corners in board top-left, top-right, bottom-right, bottom-left order; drag to refine. Lines mark the boundary and the exterior is shaded. Click **Generate corrected image** to persist and normalize at the configured pixels/mm. The app switches to **Corrected** view, where annotations are created and edited. Without correction, annotation is unavailable. Review any source-resolution warning. Corner edits are drafts until generation succeeds.
-6. JSON autosaves 600 ms after the last annotation change. Requests are serialized. Save now retries failed saves. Image switching, candidate import, correction, and export wait for saves; failed saves block these operations. Closing with unsaved work prompts the browser's standard warning. Export is blocked until every retained annotation is reviewed.
+6. JSON autosaves 600 ms after the last annotation change. Requests are serialized. Save now retries failed saves. Image switching, prediction requests, correction, and dataset exchange wait for saves; failed saves block these operations. Closing with unsaved work prompts the browser's standard warning. Ground-truth export requires every included image to be marked complete and every retained annotation to be reviewed.
 
-Candidate import example (canonical pixels; replace perspective_file with the current document value):
-
-```json
-{
-  "model_version": "experiment-001",
-  "coordinate_space": "canonical",
-  "perspective_file": "<current perspective.file>",
-  "annotations": [
-    {"id":"candidate-1","className":"varroa","x":1234.5,"y":987.2,"source":"model","confidence":0.87,"reviewed":false}
-  ]
-}
-```
-
-Only one model batch is accepted per image to prevent accidental duplication and preserve experiment provenance. The backend forces imported candidates to unreviewed/model regardless of their submitted flags. IDs must be unique across retained and rejected annotations.
+Only one model batch is accepted per image to prevent accidental duplication and preserve experiment provenance. The backend forces imported predictions to unreviewed/model regardless of their submitted flags. IDs must be unique across retained and rejected annotations. Legacy single-image candidate and annotation-export API endpoints remain available; use Dataset exchange for the current portable format.
 
 ## Coordinates and files
 
@@ -65,13 +52,13 @@ Stage pointer positions are CSS pixels. The inverse transform is `(screen - tran
 
 JSON includes `image_id`, dimensions, `coordinate_space`, `perspective`, `dataset_version`, `model_version`, annotations, rejected prediction records, and effort statistics. Annotation class is named `className` consistently with the active-learning schema. Perspective metadata records source points, physical dimensions, pixels/mm, quality, homography and inverse, output size and generated filename. Export uses canonical coordinates. See [the normalization and migration contract](PERSPECTIVE.md) for deterministic geometry, per-image profiles, source quality, legacy conversion and the PWA contract.
 
-Effort counters record adds, acceptance actions, deletes, moves, undo and redo without erasing effort on undo. Current prediction/accepted/rejected/manual counts derive from document state. Active seconds estimates interaction time from gaps between edits capped at 60 seconds per action; it is not precise labor timing. Dataset version is user-controlled metadata. Review provenance and counters support future comparisons, but baseline experimental timing must be collected separately.
+Effort counters record adds, acceptance actions, deletes, moves, undo and redo without erasing effort on undo. Current prediction/accepted/rejected/manual counts derive from document state. Active seconds estimates interaction time from gaps between edits capped at 60 seconds per action; it is not precise labor timing. Choose the dataset version in Dataset exchange; it is written to the exported manifest. Review provenance and counters support future comparisons, but baseline experimental timing must be collected separately.
 
 ## Model integration
 
 ### Reset annotations
 
-The sidebar provides **Reset current image annotations** (confirmation required) and **Reset ALL annotations…** (type `RESET ALL`). These permanently clear retained annotations, rejected predictions, model-version provenance, and effort statistics for the chosen scope. Original images, corrected images, perspective metadata, and dataset version are preserved. Undo/redo history is cleared. Pending autosaves finish before reset. A cleared image can import a new prediction batch.
+The sidebar provides **Reset current image annotations** (confirmation required) and **Reset ALL annotations...** (type `RESET ALL`). These permanently clear retained annotations, rejected predictions, review status, model-version provenance, and effort statistics for the chosen scope. Original images, corrected images, perspective metadata, and dataset version are preserved. Undo/redo history is cleared. Pending autosaves finish before reset. A cleared image can import a new prediction batch.
 
 API: `POST /api/images/{id}/annotations/reset` or `POST /api/annotations/reset-all` with `{"confirmation":"RESET ALL"}`. As with other editing operations, use one local editor; dataset-wide reset is not a multi-file transaction if the disk fails midway.
 
