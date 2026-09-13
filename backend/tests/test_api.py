@@ -183,3 +183,42 @@ def test_reset_all_requires_confirmation_and_persists(client):
         assert all(v == 0 for v in doc['effort'].values())
         assert client.get(f"/api/images/{doc['image_id']}/file").status_code == 200
         assert json.loads(main.path(doc['image_id']).read_text()) == doc
+
+
+def test_delete_image_removes_its_dataset_files_and_history(client):
+    doc = upload(client)
+    other = upload(client)
+    image_id = doc['image_id']
+
+    # A second correction archives the previous document and leaves two
+    # corrected rasters associated with this image.
+    base = f"/api/images/{image_id}"
+    corners = [{'x': 0, 'y': 0}, {'x': 119, 'y': 0}, {'x': 119, 'y': 79}, {'x': 0, 'y': 79}]
+    assert client.post(base+'/perspective', json={
+        'corners': corners, 'physical_width_mm': 15, 'physical_height_mm': 10,
+    }).status_code == 200
+
+    prediction_history = main.ROOT / 'prediction_history'
+    prediction_history.mkdir(exist_ok=True)
+    (prediction_history / f'{image_id}.json').write_text('{}', encoding='utf-8')
+    (prediction_history / f'{image_id}.before.json').write_text('{}', encoding='utf-8')
+    (prediction_history / f"{other['image_id']}.json").write_text('{}', encoding='utf-8')
+    unrelated_history = main.ROOT / 'history' / 'unrelated.json'
+    unrelated_history.parent.mkdir(exist_ok=True)
+    unrelated_history.write_text('{}', encoding='utf-8')
+
+    response = client.delete(base)
+    assert response.status_code == 200
+    assert response.json() == {'deleted_image_id': image_id}
+    assert client.get(base).status_code == 404
+    assert image_id not in {item['image_id'] for item in client.get('/api/images').json()}
+    assert not main.path(image_id).exists()
+    assert not (main.ROOT / 'images' / f'{image_id}.original').exists()
+    assert not (main.ROOT / 'images' / f'{image_id}.png').exists()
+    assert not list((main.ROOT / 'corrected').glob(f'{image_id}-*.png'))
+    assert not list((main.ROOT / 'history').glob(f'{image_id}-*.json'))
+    assert not list(prediction_history.glob(f'{image_id}*.json'))
+    assert (main.ROOT / 'images' / f"{other['image_id']}.png").exists()
+    assert (prediction_history / f"{other['image_id']}.json").exists()
+    assert unrelated_history.exists()
+    assert client.delete(base).status_code == 404

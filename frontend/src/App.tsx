@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
 import type { Doc, ModelRegistry, Point } from "./types";
 
+type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange";
+
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const r = await fetch(url, options);
   if (!r.ok) {
@@ -31,6 +33,7 @@ export default function App() {
   const [exchangeDirectory, setExchangeDirectory] = useState("");
   const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
   const [reviewStats, setReviewStats] = useState<Record<string, number | string> | null>(null);
+  const [activeWorkflowStep, setActiveWorkflowStep] = useState<WorkflowStep | null>("image");
   const [trainedModels, setTrainedModels] = useState<ModelRegistry["models"]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [modelStatus, setModelStatus] = useState("loading");
@@ -49,6 +52,11 @@ export default function App() {
   function show(d: Doc) {
     current.current = d;
     setDoc(d);
+  }
+  function toggleWorkflowStep(step: WorkflowStep, isOpen: boolean) {
+    setActiveWorkflowStep((active) =>
+      isOpen ? step : active === step ? null : active,
+    );
   }
   function flush(): Promise<void> {
     clearTimeout(timer.current);
@@ -174,6 +182,13 @@ export default function App() {
     setCorrected(d.coordinate_space === "canonical");
     setPerspective(false);
     setReviewStats(null);
+    setActiveWorkflowStep(
+      d.review_complete
+        ? "exchange"
+        : d.coordinate_space === "canonical"
+          ? "annotate"
+          : "prepare",
+    );
     lastAction.current = Date.now();
   }
   async function resetAnnotations(all: boolean) {
@@ -216,9 +231,47 @@ export default function App() {
       }
       select(null);
       setReviewStats(null);
+      setActiveWorkflowStep(current.current ? "annotate" : "image");
       lastAction.current = Date.now();
       setStatus("Saved");
       setList(await api<Doc[]>("/api/images"));
+    });
+  }
+  async function deleteCurrentImage() {
+    const image = current.current;
+    if (
+      !image ||
+      !window.confirm(
+        `Remove "${image.filename}" from this dataset? This permanently deletes its uploaded image, corrected copies, annotations, prediction records, and local review history. Previously exported bundles remain unchanged. This cannot be undone.`,
+      )
+    )
+      return;
+
+    await run(async () => {
+      // Finish any queued save before the API removes this image's files.
+      await flush();
+      await api<{ deleted_image_id: string }>(
+        `/api/images/${image.image_id}`,
+        { method: "DELETE" },
+      );
+      current.current = null;
+      setDoc(null);
+      pending.current = null;
+      past.current = [];
+      future.current = [];
+      select(null);
+      setList((items) => items.filter((item) => item.image_id !== image.image_id));
+      setCorners([]);
+      setBoardProfile("");
+      setWidthMm("");
+      setHeightMm("");
+      setCorrected(false);
+      setPerspective(false);
+      setReviewStats(null);
+      setMode("manual");
+      setActiveWorkflowStep("image");
+      lastAction.current = Date.now();
+      setStatus("Image removed from dataset");
     });
   }
   useEffect(() => {
@@ -296,57 +349,84 @@ export default function App() {
       )}
       <div className="workspace">
         <aside>
-          <label>
-            Upload JPEG / PNG
-            <input
-              disabled={busy}
-              type="file"
-              accept="image/jpeg,image/png"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (!f) return;
-                void run(async () => {
-                  await flush();
-                  const form = new FormData();
-                  form.append("file", f);
-                  const d = await api<Doc>("/api/images", {
-                    method: "POST",
-                    body: form,
-                  });
-                  setList((l) => [...l, d]);
-                  await load(d.image_id);
-                });
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <label>
-            Image
-            <select
-              value={doc?.image_id || ""}
-              disabled={busy}
-              onChange={(e) => void run(() => load(e.target.value))}
-            >
-              <option value="" disabled>
-                Select an image
-              </option>
-              {list.map((d) => (
-                <option key={d.image_id} value={d.image_id}>
-                  {d.filename}
-                </option>
-              ))}
-            </select>
-          </label>
+          <details
+            className="workflow-step"
+            open={activeWorkflowStep === "image"}
+            onToggle={(e) =>
+              toggleWorkflowStep("image", e.currentTarget.open)
+            }
+          >
+            <summary>
+              <span className="step-number">1</span>
+              <span className="step-title">Choose image</span>
+              <span className="step-status">
+                {doc ? "Selected" : "Start here"}
+              </span>
+            </summary>
+            <div className="workflow-content">
+              <label>
+                Upload JPEG / PNG
+                <input
+                  disabled={busy}
+                  type="file"
+                  accept="image/jpeg,image/png"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    void run(async () => {
+                      await flush();
+                      const form = new FormData();
+                      form.append("file", f);
+                      const d = await api<Doc>("/api/images", {
+                        method: "POST",
+                        body: form,
+                      });
+                      setList((l) => [...l, d]);
+                      await load(d.image_id);
+                    });
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              <label>
+                Image
+                <select
+                  value={doc?.image_id || ""}
+                  disabled={busy}
+                  onChange={(e) => void run(() => load(e.target.value))}
+                >
+                  <option value="" disabled>
+                    Select an image
+                  </option>
+                  {list.map((d) => (
+                    <option key={d.image_id} value={d.image_id}>
+                      {d.filename}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </details>
           {doc && (
             <>
+              <details
+                className="workflow-step"
+                open={activeWorkflowStep === "prepare"}
+                onToggle={(e) =>
+                  toggleWorkflowStep("prepare", e.currentTarget.open)
+                }
+              >
+                <summary>
+                  <span className="step-number">2</span>
+                  <span className="step-title">Prepare image</span>
+                  <span className="step-status">
+                    {doc.coordinate_space === "canonical" ? "Ready" : "Optional"}
+                  </span>
+                </summary>
+                <div className="workflow-content">
               <p>
                 {doc.original_width} x {doc.original_height} original pixels
               </p>
-              <details
-                className="sidebar-section"
-                open={doc.coordinate_space !== "canonical"}
-              >
-                <summary>Image setup and correction</summary>
               <h3>Image view</h3>
               <div className="buttons">
                 <button
@@ -393,6 +473,8 @@ export default function App() {
               <p>
                 Scale: {normalization?.pixels_per_mm ?? "Loading"} pixels/mm.
                 Board width and height describe the physical board boundary.
+                Physical correction is required for model predictions; manual
+                labels can also use original pixels.
               </p>
               <label>
                 Board profile
@@ -495,6 +577,7 @@ export default function App() {
                         setCorrected(true);
                         setPerspective(false);
                         select(null);
+                        setActiveWorkflowStep("annotate");
                       })
                     }
                   >
@@ -515,10 +598,26 @@ export default function App() {
                   Open corrected image file
                 </a>
               )}
+                </div>
               </details>
 
-              <details className="sidebar-section" open>
-                <summary>Annotations ({doc.annotations.length})</summary>
+              <details
+                className="workflow-step"
+                open={activeWorkflowStep === "annotate"}
+                onToggle={(e) =>
+                  toggleWorkflowStep("annotate", e.currentTarget.open)
+                }
+              >
+                <summary>
+                  <span className="step-number">3</span>
+                  <span className="step-title">Annotate and review</span>
+                  <span className="step-status">
+                    {doc.annotations.length === 0
+                      ? "To do"
+                      : `${doc.annotations.length} labels`}
+                  </span>
+                </summary>
+                <div className="workflow-content">
               <label>
                 Annotation mode
                 <select value={mode} onChange={(e) => setMode(e.target.value)}>
@@ -700,182 +799,289 @@ export default function App() {
                   ))}
                 </details>
               </fieldset>
+                </div>
               </details>
             </>
           )}
-          <details className="sidebar-section">
-            <summary>Dataset exchange</summary>
-          <label>
-            Folder path on API server
-            <input
-              value={exchangeDirectory}
-              onChange={(e) => setExchangeDirectory(e.target.value)}
-              placeholder="F:/ImkerApp/exports/dataset-v1"
-            />
-          </label>
-          <p>
-            Exports require a new folder outside app data. Imports read an
-            existing prediction bundle from this path. The API server accesses
-            the folder, not this browser.
-          </p>
-          <label>
-            Dataset version
-            <input
-              value={exchangeVersion}
-              onChange={(e) => setExchangeVersion(e.target.value)}
-            />
-          </label>
-          <p>This version is written to the exported dataset manifest.</p>
-          {doc && (
+          {!doc && (
             <>
+              <details
+                className="workflow-step"
+                open={activeWorkflowStep === "prepare"}
+                onToggle={(e) =>
+                  toggleWorkflowStep("prepare", e.currentTarget.open)
+                }
+              >
+                <summary>
+                  <span className="step-number">2</span>
+                  <span className="step-title">Prepare image</span>
+                  <span className="step-status">Waiting</span>
+                </summary>
+                <div className="workflow-content">
+                  <p>Choose an image to configure its physical correction.</p>
+                </div>
+              </details>
+              <details
+                className="workflow-step"
+                open={activeWorkflowStep === "annotate"}
+                onToggle={(e) =>
+                  toggleWorkflowStep("annotate", e.currentTarget.open)
+                }
+              >
+                <summary>
+                  <span className="step-number">3</span>
+                  <span className="step-title">Annotate and review</span>
+                  <span className="step-status">Waiting</span>
+                </summary>
+                <div className="workflow-content">
+                  <p>Choose an image to start annotation.</p>
+                </div>
+              </details>
+            </>
+          )}
+          <details
+            className="workflow-step"
+            open={activeWorkflowStep === "finish"}
+            onToggle={(e) =>
+              toggleWorkflowStep("finish", e.currentTarget.open)
+            }
+          >
+            <summary>
+              <span className="step-number">4</span>
+              <span className="step-title">Finish image review</span>
+              <span className="step-status">
+                {!doc
+                  ? "Waiting"
+                  : doc.review_complete
+                    ? "Complete"
+                    : doc.annotations.some((annotation) => !annotation.reviewed)
+                      ? `${doc.annotations.filter((annotation) => !annotation.reviewed).length} pending`
+                      : "Ready"}
+              </span>
+            </summary>
+            <div className="workflow-content">
+              {doc ? (
+                <>
+                  <button
+                    disabled={
+                      busy ||
+                      doc.review_complete ||
+                      doc.annotations.some((annotation) => !annotation.reviewed)
+                    }
+                    onClick={() =>
+                      void run(async () => {
+                        commit({ ...doc, review_complete: true });
+                        await flush();
+                        setActiveWorkflowStep("exchange");
+                        setReviewStats(
+                          await api<Record<string, number | string>>(
+                            `/api/images/${doc.image_id}/review-statistics`,
+                          ),
+                        );
+                      })
+                    }
+                  >
+                    Mark image review complete
+                  </button>
+                  <p>
+                    Check the whole image before finishing. Empty images can be
+                    marked complete and are valid negatives for training.
+                  </p>
+                  {reviewStats && (
+                    <details open>
+                      <summary>Review statistics</summary>
+                      {Object.entries(reviewStats)
+                        .filter(([key]) => !["schema_version", "image_id"].includes(key))
+                        .map(([key, value]) => (
+                          <div key={key}>{key.replaceAll("_", " ")}: {value}</div>
+                        ))}
+                    </details>
+                  )}
+                </>
+              ) : (
+                <p>Choose an image to begin.</p>
+              )}
+            </div>
+          </details>
+
+          <details
+            className="workflow-step"
+            open={activeWorkflowStep === "exchange"}
+            onToggle={(e) =>
+              toggleWorkflowStep("exchange", e.currentTarget.open)
+            }
+          >
+            <summary>
+              <span className="step-number">5</span>
+              <span className="step-title">Exchange dataset</span>
+              <span className="step-status">
+                {exchangeDirectory ? "Folder set" : "Optional"}
+              </span>
+            </summary>
+            <div className="workflow-content">
+              <label>
+                Folder path on API server
+                <input
+                  value={exchangeDirectory}
+                  onChange={(e) => setExchangeDirectory(e.target.value)}
+                  placeholder="F:/ImkerApp/exports/dataset-v1"
+                />
+              </label>
+              <p>
+                For exports, choose a new folder outside app data. For imports,
+                choose an existing predictions folder. The API server accesses
+                this path, not the browser.
+              </p>
+              <label>
+                Export dataset version
+                <input
+                  value={exchangeVersion}
+                  onChange={(e) => setExchangeVersion(e.target.value)}
+                />
+              </label>
+              <p>
+                Used for both exports. Imports ignore this setting.
+              </p>
               <button
-                disabled={busy || doc.annotations.some((a) => !a.reviewed)}
+                disabled={busy || !exchangeDirectory}
                 onClick={() =>
                   void run(async () => {
-                    commit({ ...doc, review_complete: true });
                     await flush();
-                    setReviewStats(
-                      await api<Record<string, number | string>>(
-                        `/api/images/${doc.image_id}/review-statistics`,
-                      ),
+                    const documents = await api<Doc[]>("/api/images");
+                    await api(
+                      "/api/exchange/export",
+                      json({
+                        directory: exchangeDirectory,
+                        dataset_version: exchangeVersion,
+                        purpose: "ground_truth",
+                        image_ids: documents
+                          .filter((image) => image.review_complete)
+                          .map((image) => image.image_id),
+                      }),
                     );
+                    setStatus("Reviewed images exported for training");
                   })
                 }
               >
-                Finish image review
+                Export reviewed images for training
               </button>
               <p>
-                {doc.review_complete
-                  ? "Image review complete"
-                  : "Image review incomplete"}
-                . Mark empty images complete too; they are valid negatives for
-                training.
+                Includes images marked complete after review, including empty
+                images. These labels form the reviewed training set.
               </p>
-            </>
-          )}
-          <button
-            disabled={busy || !exchangeDirectory}
-            onClick={() =>
-              void run(async () => {
-                await flush();
-                const documents = await api<Doc[]>("/api/images");
-                await api(
-                  "/api/exchange/export",
-                  json({
-                    directory: exchangeDirectory,
-                    dataset_version: exchangeVersion,
-                    purpose: "ground_truth",
-                    image_ids: documents
-                      .filter((image) => image.review_complete)
-                      .map((image) => image.image_id),
-                  }),
-                );
-                setStatus("Reviewed dataset exported");
-              })
-            }
-          >
-            Export completed images as ground truth
-          </button>
-          <button
-            disabled={busy || !exchangeDirectory}
-            onClick={() =>
-              void run(async () => {
-                await flush();
-                const documents = await api<Doc[]>("/api/images");
-                await api(
-                  "/api/exchange/export",
-                  json({
-                    directory: exchangeDirectory,
-                    dataset_version: exchangeVersion,
-                    purpose: "unreviewed",
-                    image_ids: documents
-                      .filter(
-                        (image) =>
-                          !image.review_complete && image.model_version === null,
-                      )
-                      .map((image) => image.image_id),
-                  }),
-                );
-                setStatus("Images without predictions exported");
-              })
-            }
-          >
-            Export images without predictions
-          </button>
-          <p>
-            This includes images that are not marked complete and do not already
-            have a prediction batch.
-          </p>
-          <button
-            disabled={busy || !exchangeDirectory}
-            onClick={() =>
-              void run(async () => {
-                await flush();
-                await api(
-                  "/api/exchange/import",
-                  json({ directory: exchangeDirectory }),
-                );
-                setList(await api<Doc[]>("/api/images"));
-                if (doc) await load(doc.image_id);
-                setMode("review");
-                setStatus("Predictions imported");
-              })
-            }
-          >
-            Import prediction directory
-          </button>
-          <p>
-            The directory must contain predictions for matching image IDs. An
-            image can receive one prediction batch until its annotations are reset.
-          </p>
-          {reviewStats && (
-            <details open>
-              <summary>Review statistics</summary>
-              {Object.entries(reviewStats)
-                .filter(([key]) => !["schema_version", "image_id"].includes(key))
-                .map(([key, value]) => (
-                  <div key={key}>{key.replaceAll("_", " ")}: {value}</div>
-                ))}
-            </details>
-          )}
+              <button
+                disabled={busy || !exchangeDirectory}
+                onClick={() =>
+                  void run(async () => {
+                    await flush();
+                    const documents = await api<Doc[]>("/api/images");
+                    await api(
+                      "/api/exchange/export",
+                      json({
+                        directory: exchangeDirectory,
+                        dataset_version: exchangeVersion,
+                        purpose: "unreviewed",
+                        image_ids: documents
+                          .filter(
+                            (image) =>
+                              !image.review_complete && image.model_version === null,
+                          )
+                          .map((image) => image.image_id),
+                      }),
+                    );
+                    setStatus("Images exported for model prediction");
+                  })
+                }
+              >
+                Export images for model prediction
+              </button>
+              <p>
+                Sends incomplete images without a prediction batch to the
+                external model pipeline for inference.
+              </p>
+              <button
+                disabled={busy || !exchangeDirectory}
+                onClick={() =>
+                  void run(async () => {
+                    await flush();
+                    await api(
+                      "/api/exchange/import",
+                      json({ directory: exchangeDirectory }),
+                    );
+                    setList(await api<Doc[]>("/api/images"));
+                    if (doc) await load(doc.image_id);
+                    setMode("review");
+                    setActiveWorkflowStep("annotate");
+                    setStatus("Model predictions imported for review");
+                  })
+                }
+              >
+                Import model predictions for review
+              </button>
+              <p>
+                Reads an existing predictions folder with matching image IDs.
+                Each image accepts one prediction batch until its annotations
+                are reset.
+              </p>
+            </div>
           </details>
 
-          <details className="sidebar-section">
-            <summary>Reset annotations</summary>
-          <p>
-            Permanent and cannot be undone. Clears human and model annotations,
-            rejected predictions, review status, model provenance, and effort
-            statistics. Keeps uploaded images, perspective corrections, and
-            dataset version.
-          </p>
-          <button
-            className="danger"
-            disabled={busy || !doc}
-            onClick={() => void resetAnnotations(false)}
-          >
-            Reset current image annotations
-          </button>
-          <button
-            className="danger"
-            disabled={busy || list.length === 0}
-            onClick={() => void resetAnnotations(true)}
-          >
-            Reset ALL annotations...
-          </button>
-          </details>
-          <details className="sidebar-section">
-            <summary>Annotation shortcuts</summary>
-          <p className="help">
-            Click image: add annotation
-            <br />
-            Drag marker: move annotation
-            <br />
-            Mouse wheel: zoom; Space + drag: pan
-            <br />
-            Ctrl/Cmd+Z: undo; Ctrl/Cmd+Shift+Z: redo
-            <br />
-            Delete/Backspace: delete selected
-          </p>
+          <details className="sidebar-tools">
+            <summary>More tools</summary>
+            <div className="workflow-content">
+              <details className="tool-section">
+                <summary>Reset annotations</summary>
+                <p>
+                  Permanent and cannot be undone. Clears human and model
+                  annotations, rejected predictions, review status, model
+                  provenance, and effort statistics. Keeps uploaded images,
+                  perspective corrections, and dataset version.
+                </p>
+                <button
+                  className="danger"
+                  disabled={busy || !doc}
+                  onClick={() => void resetAnnotations(false)}
+                >
+                  Reset current image annotations
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy || list.length === 0}
+                  onClick={() => void resetAnnotations(true)}
+                >
+                  Reset ALL annotations...
+                </button>
+              </details>
+              <details className="tool-section">
+                <summary>Remove image from dataset</summary>
+                <p>
+                  Permanently removes the selected image, its uploaded and
+                  corrected files, annotations, prediction records, and local
+                  review history. Previously exported bundles are unchanged.
+                </p>
+                <button
+                  className="danger"
+                  disabled={busy || !doc}
+                  onClick={() => void deleteCurrentImage()}
+                >
+                  Delete selected image from dataset
+                </button>
+              </details>
+              <details className="tool-section">
+                <summary>Keyboard shortcuts</summary>
+                <p className="help">
+                  Click image: add annotation
+                  <br />
+                  Drag marker: move annotation
+                  <br />
+                  Mouse wheel: zoom; Space + drag: pan
+                  <br />
+                  Ctrl/Cmd+Z: undo; Ctrl/Cmd+Shift+Z: redo
+                  <br />
+                  Delete/Backspace: delete selected
+                </p>
+              </details>
+            </div>
           </details>
         </aside>
         <section

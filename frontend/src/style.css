@@ -96,7 +96,7 @@ fieldset > button {
 .buttons {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
 }
 .buttons button {
   flex: none;
@@ -194,30 +194,96 @@ details {
   font-size: 12px;
   line-height: 1.8;
 }
-details.sidebar-section,
-details.sidebar-subsection {
+details.workflow-step,
+details.sidebar-subsection,
+details.sidebar-tools,
+details.tool-section {
   font-size: 14px;
   line-height: 1.5;
 }
-details.sidebar-section {
-  border-top: 1px solid #43505d;
-  margin-top: 18px;
-  padding-top: 14px;
+details.workflow-step {
+  border-left: 1px solid #536273;
+  margin: 4px 0 0 12px;
+  padding: 0 0 14px 14px;
 }
-details.sidebar-section > summary,
-details.sidebar-subsection > summary {
+details.workflow-step > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   cursor: pointer;
-  font-weight: 600;
-  list-style-position: inside;
+  list-style: none;
 }
-details.sidebar-section[open] > summary {
-  margin-bottom: 10px;
+details.workflow-step > summary::-webkit-details-marker {
+  display: none;
+}
+details.workflow-step > summary::after {
+  content: ">";
+  color: #aab8c7;
+  font-size: 17px;
+  margin-left: 4px;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+details.workflow-step[open] > summary::after {
+  transform: rotate(90deg);
+}
+.step-number {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  border: 1px solid #536273;
+  border-radius: 50%;
+  color: #c6d2df;
+  font-size: 12px;
+}
+details.workflow-step[open] .step-number {
+  border-color: #79a8ce;
+  background: #29445d;
+  color: #fff;
+}
+.step-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+}
+.step-status {
+  margin-left: auto;
+  max-width: 34%;
+  overflow: hidden;
+  color: #aab8c7;
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-content {
+  padding: 8px 0 0;
 }
 details.sidebar-subsection {
   margin: 10px 0;
 }
-details.sidebar-subsection > summary {
+details.sidebar-subsection > summary,
+details.sidebar-tools > summary,
+details.tool-section > summary {
+  cursor: pointer;
+  font-weight: 600;
   color: #c6d2df;
+}
+details.sidebar-tools {
+  border-top: 1px solid #43505d;
+  margin-top: 12px;
+  padding-top: 14px;
+}
+details.tool-section {
+  border-top: 1px solid #43505d;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+details.tool-section > summary {
+  font-weight: 500;
 }
 @media (max-width: 650px) {
   aside {

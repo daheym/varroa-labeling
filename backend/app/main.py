@@ -144,6 +144,33 @@ def document(image_id: str):
     return read(image_id)
 
 
+@app.delete('/api/images/{image_id}')
+def delete_image(image_id: str):
+    with lock:
+        read(image_id)
+        artifacts = [
+            path(image_id),
+            path(image_id).with_suffix('.tmp'),
+            ROOT / 'images' / f'{image_id}.original',
+            ROOT / 'images' / f'{image_id}.png',
+            ROOT / 'prediction_history' / f'{image_id}.json',
+            ROOT / 'prediction_history' / f'{image_id}.before.json',
+        ]
+        for folder, pattern in (
+            ('corrected', f'{image_id}-*.png'),
+            ('history', f'{image_id}-*.json'),
+        ):
+            directory = ROOT / folder
+            if directory.exists():
+                artifacts.extend(directory.glob(pattern))
+
+        for artifact in artifacts:
+            if artifact.is_file() or artifact.is_symlink():
+                artifact.unlink(missing_ok=True)
+
+        return {'deleted_image_id': image_id}
+
+
 @app.get('/api/images/{image_id}/file')
 def image_file(image_id: str):
     read(image_id)

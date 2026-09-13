@@ -103,7 +103,7 @@ for batch inference and moving datasets between machines.
    Click **Finish image review (including empty images)** after inspecting all mites.
 2. **Export dataset.** Under Dataset exchange, enter a new linked folder such as
    `F:/ImkerApp/exports/varroa-dataset-v1` and version `2026-09-12-001`.
-   Click **Export completed images as ground truth**. This selects only explicitly
+   Click **Export reviewed images for training**. This selects only explicitly
    completed images; the API rejects any selected incomplete image.
 3. **Import into training repo.** From varroa-training, using its installed environment:
 
@@ -126,7 +126,7 @@ for batch inference and moving datasets between machines.
 
    Keep trained weights together with their existing preprocessing contract sidecar.
 5. **Predict images without a batch.** Upload/select the next images in the annotator and
-   export them to a fresh folder with **Export images without predictions**. This only
+   export them to a fresh folder with **Export images for model prediction**. This only
    includes images that are not marked complete and do not already have a prediction
    batch. The manifest purpose is unreviewed and its reviewed_image_ids is empty.
 6. **Export predictions.** The prediction command runs inference and exports in one step:
@@ -139,15 +139,15 @@ for batch inference and moving datasets between machines.
    model_version defaults to the checkpoint stem; choose a unique immutable version
    explicitly for repeatable audits. The output contains no duplicate image copies.
 7. **Import predictions into annotator.** Enter the prediction directory's absolute
-   server path under Dataset exchange and click **Import prediction directory**.
+   server path under Dataset exchange and click **Import model predictions for review**.
    All members are validated before document changes. Images must already exist with
    matching IDs, filenames and dimensions. No filename-only fuzzy matching is performed.
 8. **Review/correct.** Select Model review mode. Blue dashed markers are unreviewed model
    predictions; green markers are confirmed/human annotations. Select a marker to see
    confidence. Accept selected, drag to correct, delete to reject, and click to add missed
    mites manually. Accepting all remaining predictions does not finish image review;
-   finish it explicitly after checking the whole image. Statistics appear below
-   Dataset exchange and are also available from the API.
+   finish it explicitly after checking the whole image. Review statistics appear
+   under Finish image review and are also available from the API.
 9. **Export new dataset version.** Choose a fresh directory and version such as
    `2026-09-12-002`. Export completed images, including previously reviewed images
    for a cumulative training set. Rejected predictions are excluded from labels.
