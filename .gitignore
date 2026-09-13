@@ -6,3 +6,4 @@ dist/
 *.tsbuildinfo
 data/*/*
 !data/*/.gitkeep
+/data_archive_*/
