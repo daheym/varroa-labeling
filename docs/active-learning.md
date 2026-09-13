@@ -78,6 +78,24 @@ Keep export and processed directories separate from application data. Use fresh 
 exports and predictions refuse to overwrite existing directories. The manifest is written
 last; treat it as the publication marker. Do not consume a directory while it is being written.
 
+## Request a prediction from the annotator
+
+For a single image, Model Review Mode can call a completed model run directly. The local
+backend discovers compatible runs under `../varroa-training/runs`; it only offers a run
+when its checkpoint, run metadata, `config.yaml`, and preprocessing sidecar are present
+and agree with the annotator's physical scale. Select a model and click **Request
+predictions**. The backend invokes `src.cli infer` in the training repo's Python environment
+on the selected image's EXIF-oriented PNG and saved perspective metadata, then persists
+the resulting candidates with the usual model provenance and review history. No model or
+image is uploaded elsewhere. The image must have current physical perspective correction,
+and only one prediction batch may be attached to it until its review history is reset.
+
+By default the training repo is the sibling `../varroa-training`, and its Python is
+`.venv/Scripts/python.exe` on Windows or `.venv/bin/python` elsewhere. Set
+`VARROA_TRAINING_ROOT`, `VARROA_TRAINING_PYTHON`, or `VARROA_PREDICT_TIMEOUT` to override
+those local server settings. The portable directory-based workflow below remains useful
+for batch inference and moving datasets between machines.
+
 ## End-to-end workflow
 
 1. **Annotate images.** Upload JPEG/PNG files in the annotator. Annotate the original
@@ -123,7 +141,7 @@ last; treat it as the publication marker. Do not consume a directory while it is
    server path under Dataset exchange and click **Import prediction directory**.
    All members are validated before document changes. Images must already exist with
    matching IDs, filenames and dimensions. No filename-only fuzzy matching is performed.
-8. **Review/correct.** Select Review mode. Amber dashed markers are unreviewed model
+8. **Review/correct.** Select Review mode. Blue dashed markers are unreviewed model
    predictions; green markers are confirmed/human annotations. Select a marker to see
    confidence. Accept selected, drag to correct, delete to reject, and click to add missed
    mites manually. Finish image review explicitly when done. Statistics appear below

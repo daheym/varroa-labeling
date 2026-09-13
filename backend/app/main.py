@@ -7,8 +7,13 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from .models import Document, Candidates, Corners, Effort, ResetConfirmation
-from .detector import UnconfiguredDetector
+from .models import Document, Candidates, Corners, Effort, PredictionRequest, ResetConfirmation
+from .detector import (
+    DetectorUnavailable,
+    PredictionFailed,
+    UnknownModel,
+    configured_detector,
+)
 from .perspective import build_transform, transform_points, normalize_image
 
 NORMALIZATION = json.loads(Path(os.environ.get('VARROA_NORMALIZATION_CONFIG',
@@ -19,7 +24,7 @@ for folder in ('images', 'corrected', 'annotations'):
     (ROOT / folder).mkdir(parents=True, exist_ok=True)
 app = FastAPI(title='Varroa annotation API')
 lock = threading.RLock()
-detector = UnconfiguredDetector()
+detector = configured_detector(NORMALIZATION)
 
 
 def path(image_id):
@@ -274,7 +279,13 @@ def export(image_id: str):
 
 @app.get('/api/models')
 def models():
-    return {'models': [], 'status': 'unconfigured'}
+    available = detector.models()
+    status = getattr(detector, 'status', 'ready' if available else 'unconfigured')
+    if available:
+        status = 'ready'
+    elif status == 'ready':
+        status = 'no_compatible_models'
+    return {'models': available, 'status': status}
 
 
 @app.post('/api/models/train')
@@ -283,9 +294,36 @@ def train():
 
 
 @app.post('/api/images/{image_id}/predict')
-def predict(image_id: str):
-    read(image_id)
-    raise HTTPException(501, 'Inference is not implemented. Import candidate JSON or connect a Detector adapter.')
+def predict(image_id: str, payload: PredictionRequest):
+    with lock:
+        doc = read(image_id)
+        if doc.coordinate_space != 'canonical' or not doc.perspective:
+            raise HTTPException(409, 'Generate physical perspective correction before requesting predictions')
+        if doc.model_version is not None:
+            raise HTTPException(409, 'This image already has a prediction batch')
+        image_path = ROOT / 'images' / f'{image_id}.png'
+        perspective = dict(doc.perspective)
+        perspective_file = perspective.get('file')
+
+    try:
+        result = detector.predict(image_path, perspective=perspective, model_id=payload.model_id)
+    except UnknownModel as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DetectorUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except PredictionFailed as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    # Prediction runs outside the document lock. Refuse to attach stale results if
+    # the user corrected the image or another request imported a batch meanwhile.
+    with lock:
+        current = read(image_id)
+        if current.model_version is not None:
+            raise HTTPException(409, 'This image already has a prediction batch')
+        if (current.coordinate_space != 'canonical' or not current.perspective
+                or current.perspective.get('file') != perspective_file):
+            raise HTTPException(409, 'Image perspective changed during prediction; request predictions again')
+        return candidates(image_id, result)
 
 
 # Linked directories are deliberately local filesystem operations, like the existing data store.

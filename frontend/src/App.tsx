@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
-import type { Doc, Point } from "./types";
+import type { Doc, ModelRegistry, Point } from "./types";
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const r = await fetch(url, options);
@@ -31,6 +31,9 @@ export default function App() {
   const [exchangeDirectory, setExchangeDirectory] = useState("");
   const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
   const [reviewStats, setReviewStats] = useState<Record<string, number | string> | null>(null);
+  const [trainedModels, setTrainedModels] = useState<ModelRegistry["models"]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [modelStatus, setModelStatus] = useState("loading");
   const [normalization, setNormalization] = useState<{pixels_per_mm: number; board_profiles: Record<string, {physical_width_mm: number; physical_height_mm: number}>}>();
   const [boardProfile, setBoardProfile] = useState("");
   const [widthMm, setWidthMm] = useState("");
@@ -147,6 +150,16 @@ export default function App() {
       setBusy(false);
     }
   }
+  async function refreshModels() {
+    const registry = await api<ModelRegistry>("/api/models");
+    setTrainedModels(registry.models);
+    setModelStatus(registry.status);
+    setSelectedModel((currentModel) =>
+      registry.models.some((model) => model.id === currentModel)
+        ? currentModel
+        : (registry.models[0]?.id || ""),
+    );
+  }
   async function load(id: string) {
     await flush();
     const d = await api<Doc>(`/api/images/${id}`);
@@ -217,6 +230,7 @@ export default function App() {
   }
   useEffect(() => {
     api<typeof normalization>("/api/normalization").then(setNormalization).catch(e => setError(String(e)));
+    void refreshModels().catch(e => setError(String(e)));
     api<Doc[]>("/api/images")
       .then(setList)
       .catch((e) => setError(String(e)));
@@ -353,7 +367,7 @@ export default function App() {
               </div>
               <div className="legend">
                 ● Green: reviewed / human
-                <br />◌ Amber: unreviewed model
+                <br />◌ Blue: unreviewed model
                 <br />○ White: selected
               </div>
               <fieldset disabled={busy}>
@@ -428,18 +442,57 @@ export default function App() {
                         }}
                       />
                     </label>
-                    <button
-                      onClick={() =>
-                        void run(async () => {
-                          await flush();
-                          await api(`/api/images/${doc.image_id}/predict`, {
-                            method: "POST",
-                          });
-                        })
-                      }
-                    >
-                      Request predictions (placeholder)
-                    </button>
+                    <label>
+                      Trained model
+                      <select
+                        value={selectedModel}
+                        disabled={!!doc.model_version || trainedModels.length === 0}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                      >
+                        <option value="">Select a trained model</option>
+                        {trainedModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="buttons">
+                      <button
+                        type="button"
+                        onClick={() => void run(refreshModels)}
+                      >
+                        Refresh model list
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!selectedModel || !!doc.model_version || doc.coordinate_space !== "canonical"}
+                        onClick={() =>
+                          void run(async () => {
+                            await flush();
+                            const updated = await api<Doc>(
+                              `/api/images/${doc.image_id}/predict`,
+                              json({ model_id: selectedModel }),
+                            );
+                            show(updated);
+                            past.current = [];
+                            future.current = [];
+                            select(null);
+                            setStatus("Predictions ready for review");
+                          })
+                        }
+                      >
+                        Request predictions
+                      </button>
+                    </div>
+                    {trainedModels.length === 0 && modelStatus !== "loading" && (
+                      <p role="status">
+                        No compatible trained models found ({modelStatus}). Check the training repository and its model preprocessing files, then refresh.
+                      </p>
+                    )}
+                    {doc.coordinate_space !== "canonical" && (
+                      <p>Generate physical perspective correction before requesting predictions.</p>
+                    )}
                     <button
                       disabled={
                         !selectedAnnotation || selectedAnnotation.reviewed

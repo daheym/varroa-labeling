@@ -138,12 +138,12 @@ export default function Canvas(p: Props) {
                   p.selected === a.id
                     ? "#fff"
                     : a.source === "model" && !a.reviewed
-                      ? "#ffbf47"
+                      ? "#248cff"
                       : "#3ff3a2"
                 }
                 fill={
                   a.source === "model" && !a.reviewed
-                    ? "#ffbf4730"
+                    ? "#248cff30"
                     : "#3ff3a230"
                 }
                 strokeWidth={2 / view.scale}

@@ -5,6 +5,7 @@ import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 from backend.app import main
+from backend.app.detector import UnconfiguredDetector
 
 
 @pytest.fixture
@@ -12,6 +13,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'ROOT', tmp_path)
     for folder in ('images', 'annotations', 'corrected'):
         (tmp_path / folder).mkdir()
+    monkeypatch.setattr(main, 'detector', UnconfiguredDetector())
     return TestClient(main.app)
 
 
@@ -67,11 +69,65 @@ def test_perspective_metadata_and_original(client):
 
 def test_validation_and_placeholders(client):
     doc = upload(client)
-    assert client.get('/api/models').json()['models'] == []
+    assert client.get('/api/models').json() == {'models': [], 'status': 'unconfigured'}
     assert client.post('/api/models/train').status_code == 501
-    assert client.post(f"/api/images/{doc['image_id']}/predict").status_code == 501
+    assert client.post(f"/api/images/{doc['image_id']}/predict", json={'model_id': 'missing'}).status_code == 503
     assert client.get('/api/images/not-an-id').status_code == 404
     assert client.post('/api/images', files={'file': ('bad.png', b'bad', 'image/png')}).status_code == 415
+
+
+def test_predict_uses_selected_model_and_persists_candidates(client, monkeypatch):
+    doc = upload(client)
+
+    class FakeDetector:
+        status = 'ready'
+
+        def models(self):
+            return [{'id': 'runs/demo/yolo/weights/best.pt', 'label': 'demo best', 'model_version': 'demo@abc123'}]
+
+        def predict(self, image_path, *, perspective, model_id):
+            assert image_path.exists()
+            assert perspective['file'] == doc['perspective']['file']
+            assert model_id == 'runs/demo/yolo/weights/best.pt'
+            from backend.app.models import Annotation, Candidates
+            return Candidates(
+                model_version='demo@abc123',
+                coordinate_space='canonical',
+                perspective_file=perspective['file'],
+                annotations=[Annotation(
+                    id='pred_demo', x=22.5, y=31.25, source='model', confidence=.91,
+                    model_version='demo@abc123', reviewed=False,
+                    bbox={'x': 10, 'y': 12, 'width': 5, 'height': 6},
+                )],
+            )
+
+    monkeypatch.setattr(main, 'detector', FakeDetector())
+    registry = client.get('/api/models').json()
+    assert registry['status'] == 'ready'
+    assert registry['models'][0]['id'] == 'runs/demo/yolo/weights/best.pt'
+    response = client.post(f"/api/images/{doc['image_id']}/predict", json={'model_id': registry['models'][0]['id']})
+    assert response.status_code == 200, response.text
+    predicted = response.json()
+    assert predicted['model_version'] == 'demo@abc123'
+    assert predicted['annotations'][0]['x'] == 22.5
+    assert predicted['annotations'][0]['confidence'] == .91
+    assert predicted['annotations'][0]['reviewed'] is False
+    assert json.loads((main.ROOT / 'prediction_history' / f"{doc['image_id']}.json").read_text())['annotations'][0]['source'] == 'model'
+    assert client.post(f"/api/images/{doc['image_id']}/predict", json={'model_id': registry['models'][0]['id']}).status_code == 409
+
+
+def test_predict_requires_current_physical_correction(client, monkeypatch):
+    doc = upload(client, corrected=False)
+
+    class MustNotPredict:
+        status = 'ready'
+        def models(self): return [{'id': 'model', 'label': 'model', 'model_version': 'model-v1'}]
+        def predict(self, *args, **kwargs): raise AssertionError('inference must not run without correction')
+
+    monkeypatch.setattr(main, 'detector', MustNotPredict())
+    response = client.post(f"/api/images/{doc['image_id']}/predict", json={'model_id': 'model'})
+    assert response.status_code == 409
+    assert 'perspective correction' in response.json()['detail']
 
 
 def test_exif_orientation(client):

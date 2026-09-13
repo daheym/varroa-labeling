@@ -53,6 +53,10 @@ class Candidates(BaseModel):
     annotations: list[Annotation]
 
 
+class PredictionRequest(BaseModel):
+    model_id: str = Field(min_length=1)
+
+
 class Corners(BaseModel):
     corners: list[Point] = Field(min_length=4, max_length=4)
     board_profile: str | None = None

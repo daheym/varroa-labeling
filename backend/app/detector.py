@@ -1,21 +1,288 @@
-from typing import Protocol
+"""Adapter to inference in the sibling varroa-training repository.
+
+The labeling environment stays lightweight. Inference is delegated to the
+training repository's own virtual environment and CLI, which calls the same
+``predict_image`` pipeline used by offline evaluation and interchange.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from .models import Candidates
+from typing import Protocol
+
+from .models import Annotation, Candidates
+
+
+class DetectorError(RuntimeError):
+    """Base class for errors that should be shown as actionable API responses."""
+
+
+class DetectorUnavailable(DetectorError):
+    pass
+
+
+class UnknownModel(DetectorError):
+    pass
+
+
+class PredictionFailed(DetectorError):
+    pass
 
 
 class Detector(Protocol):
-    """Receive only the canonical raster. Return canonical points tied to perspective['file'].
+    def models(self) -> list[dict]: ...
 
-    Validate model pixels/mm and input settings against perspective before inference.
-    Never pass the original upload to this adapter.
-    """
-    def predict(self, canonical_image_path: Path, model_version: str, *, perspective: dict) -> Candidates: ...
-    def train(self, dataset_path: Path, dataset_version: str) -> str: ...
+    def predict(self, image_path: Path, *, perspective: dict, model_id: str) -> Candidates: ...
+
+
+@dataclass(frozen=True)
+class TrainedModel:
+    id: str
+    label: str
+    model_version: str
+    checkpoint: Path
+    config: Path
+
+    def public(self) -> dict[str, str]:
+        return {"id": self.id, "label": self.label, "model_version": self.model_version}
+
+
+CONTRACT_CONFIG_KEYS = (
+    "pixels_per_mm",
+    "tile_size",
+    "overlap",
+    "imgsz",
+    "min_source_scale_ratio",
+    "quality_policy",
+    "allow_legacy_original",
+)
+
+
+class TrainingRepoDetector:
+    """Find compatible completed runs and invoke their matching inference CLI."""
+
+    def __init__(
+        self,
+        training_root: Path,
+        python: Path,
+        normalization: dict,
+        timeout_seconds: int = 600,
+    ):
+        self.training_root = Path(training_root).resolve()
+        self.python = Path(python).resolve()
+        self.normalization = normalization
+        self.timeout_seconds = timeout_seconds
+
+    @property
+    def status(self) -> str:
+        if not self.training_root.is_dir() or not (self.training_root / "runs").is_dir():
+            return "training_repo_missing"
+        if not self.python.is_file():
+            return "training_python_missing"
+        return "ready"
+
+    def models(self) -> list[dict]:
+        return [model.public() for model in self._models()]
+
+    def _checkpoint_for(self, metadata_path: Path, metadata: dict) -> Path | None:
+        recorded = metadata.get("checkpoint")
+        if not isinstance(recorded, str) or not recorded:
+            return None
+        name = Path(recorded).name
+        candidates = []
+        recorded_path = Path(recorded)
+        if recorded_path.is_absolute():
+            candidates.append(recorded_path)
+        candidates.extend((
+            metadata_path.parent / "yolo" / "weights" / name,
+            metadata_path.parent / "weights" / name,
+        ))
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(self.training_root)
+            except (OSError, ValueError):
+                continue
+            if resolved.is_file():
+                return resolved
+        return None
+
+    def _compatible(self, metadata: dict, checkpoint: Path) -> bool:
+        config = metadata.get("config")
+        if not isinstance(config, dict) or any(key not in config for key in CONTRACT_CONFIG_KEYS):
+            return False
+        sidecar_path = checkpoint.with_suffix(".preprocessing.json")
+        try:
+            sidecar = json.loads(sidecar_path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        expected = {
+            "normalization_version": 1,
+            "pixel_convention": "board_edges",
+            **{key: config[key] for key in CONTRACT_CONFIG_KEYS},
+        }
+        if sidecar != expected:
+            return False
+        if sidecar.get("normalization_version") != 1 or sidecar.get("pixel_convention") != "board_edges":
+            return False
+        # The annotator's perspective transform is created with these settings.
+        # A model at another physical scale cannot consume its canonical raster.
+        return all(
+            sidecar.get(key) == self.normalization.get(key)
+            for key in ("pixels_per_mm", "min_source_scale_ratio", "quality_policy")
+        )
+
+    def _models(self) -> list[TrainedModel]:
+        if not self.training_root.is_dir() or not self.python.is_file():
+            return []
+        found: dict[str, TrainedModel] = {}
+        finished_at: dict[str, str] = {}
+        for metadata_path in (self.training_root / "runs").rglob("metadata.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if metadata.get("status") != "complete":
+                continue
+            checkpoint = self._checkpoint_for(metadata_path, metadata)
+            config_path = metadata_path.parent / "config.yaml"
+            if not checkpoint or not config_path.is_file() or not self._compatible(metadata, checkpoint):
+                continue
+            digest = metadata.get("checkpoint_sha256")
+            if isinstance(digest, str) and digest:
+                actual = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+                if actual != digest:
+                    continue
+            model_id = checkpoint.relative_to(self.training_root).as_posix()
+            version = f"{model_id}@{digest[:12]}" if isinstance(digest, str) and digest else model_id
+            found[model_id] = TrainedModel(
+                id=model_id,
+                label=model_id,
+                model_version=version,
+                checkpoint=checkpoint,
+                config=config_path.resolve(),
+            )
+            finished_at[model_id] = str(metadata.get("finished_at", ""))
+        return sorted(found.values(), key=lambda item: (finished_at[item.id], item.id), reverse=True)
+
+    def predict(self, image_path: Path, *, perspective: dict, model_id: str) -> Candidates:
+        if not self.python.is_file():
+            raise DetectorUnavailable(f"Training Python environment not found: {self.python}")
+        model = next((item for item in self._models() if item.id == model_id), None)
+        if model is None:
+            raise UnknownModel("Selected model is no longer available or is incompatible with this annotator")
+        if not image_path.is_file():
+            raise PredictionFailed("The selected image file is missing")
+        perspective_file = perspective.get("file")
+        if not perspective_file:
+            raise PredictionFailed("Generate physical perspective correction before requesting predictions")
+
+        with tempfile.TemporaryDirectory(prefix="varroa-predict-") as temp_dir:
+            temp = Path(temp_dir)
+            metadata_path = temp / "perspective.json"
+            output = temp / "prediction"
+            metadata_path.write_text(json.dumps({"perspective": perspective}), encoding="utf-8")
+            command = [
+                str(self.python), "-m", "src.cli",
+                "--config", str(model.config),
+                "infer",
+                "--weights", str(model.checkpoint),
+                "--image", str(image_path.resolve()),
+                "--perspective", str(metadata_path),
+                "--output", str(output),
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=self.training_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PredictionFailed("Prediction timed out; try a smaller image or increase VARROA_PREDICT_TIMEOUT") from exc
+            except OSError as exc:
+                raise DetectorUnavailable(f"Could not start the training environment: {exc}") from exc
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "Training inference failed").strip()
+                raise PredictionFailed(detail[-3000:])
+            try:
+                result = json.loads(output.with_suffix(".json").read_text("utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise PredictionFailed("Training inference did not produce a valid prediction JSON file") from exc
+
+        if result.get("coordinate_space") != "canonical":
+            raise PredictionFailed("Training inference returned coordinates outside the normalized image")
+        annotations = []
+        normalized_perspective = result.get("perspective") or {}
+        original_width = normalized_perspective.get("original_width")
+        original_height = normalized_perspective.get("original_height")
+        for detection in result.get("detections", []):
+            x1, y1, x2, y2 = map(float, detection["box"])
+            bbox = None
+            polygon = detection.get("original_polygon")
+            if polygon and original_width and original_height:
+                original_x1 = max(0.0, min(float(point[0]) for point in polygon))
+                original_y1 = max(0.0, min(float(point[1]) for point in polygon))
+                original_x2 = min(float(original_width), max(float(point[0]) for point in polygon))
+                original_y2 = min(float(original_height), max(float(point[1]) for point in polygon))
+                if original_x2 > original_x1 and original_y2 > original_y1:
+                    # In the labeling document, annotation points are canonical
+                    # while optional detection boxes retain original-image pixels.
+                    bbox = {
+                        "x": original_x1,
+                        "y": original_y1,
+                        "width": original_x2 - original_x1,
+                        "height": original_y2 - original_y1,
+                    }
+            annotations.append(Annotation(
+                id="pred_" + uuid.uuid4().hex,
+                className="varroa",
+                x=(x1 + x2) / 2,
+                y=(y1 + y2) / 2,
+                bbox=bbox,
+                source="model",
+                confidence=float(detection["confidence"]),
+                model_version=model.model_version,
+                reviewed=False,
+            ))
+        return Candidates(
+            model_version=model.model_version,
+            coordinate_space="canonical",
+            perspective_file=perspective_file,
+            annotations=annotations,
+        )
 
 
 class UnconfiguredDetector:
-    def predict(self, canonical_image_path: Path, model_version: str, *, perspective: dict) -> Candidates:
-        raise NotImplementedError('No detector configured. Import candidate JSON for review.')
+    """Used when the sibling training repository is not configured or present."""
+
+    status = "unconfigured"
+
+    def models(self) -> list[dict]:
+        return []
+
+    def predict(self, image_path: Path, *, perspective: dict, model_id: str) -> Candidates:
+        raise DetectorUnavailable("Configure VARROA_TRAINING_ROOT and VARROA_TRAINING_PYTHON to enable inference")
 
     def train(self, dataset_path: Path, dataset_version: str) -> str:
-        raise NotImplementedError('Training is not implemented.')
+        raise NotImplementedError("Training is not implemented in the labeling app")
+
+
+def configured_detector(normalization: dict) -> TrainingRepoDetector:
+    default_root = Path(__file__).resolve().parents[3] / "varroa-training"
+    root = Path(os.environ.get("VARROA_TRAINING_ROOT", default_root))
+    if os.name == "nt":
+        default_python = root / ".venv" / "Scripts" / "python.exe"
+    else:
+        default_python = root / ".venv" / "bin" / "python"
+    python = Path(os.environ.get("VARROA_TRAINING_PYTHON", default_python))
+    timeout = int(os.environ.get("VARROA_PREDICT_TIMEOUT", "600"))
+    return TrainingRepoDetector(root, python, normalization, timeout_seconds=timeout)

@@ -28,6 +28,17 @@ export type Doc = {
   effort: Record<string, number>;
 };
 
+export type ModelOption = {
+  id: string;
+  label: string;
+  model_version: string;
+};
+
+export type ModelRegistry = {
+  models: ModelOption[];
+  status: string;
+};
+
 // Mirror schemas/varroa-annotation-v1.schema.json. Runtime validation is server-side.
 export type ExchangeAnnotation = Omit<Annotation, "className" | "confidence" | "model_version"> & {
   class: "varroa"; confidence: number | null; model_version: string | null;
