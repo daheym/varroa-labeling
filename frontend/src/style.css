@@ -285,6 +285,19 @@ details.tool-section {
 details.tool-section > summary {
   font-weight: 500;
 }
+.training-log {
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid #43505d;
+  border-radius: 4px;
+  background: #11151b;
+  color: #c6d2df;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 650px) {
   aside {
     width: 230px;

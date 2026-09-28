@@ -39,6 +39,16 @@ export type ModelRegistry = {
   status: string;
 };
 
+export type TrainingStatus = {
+  state: "idle" | "running" | "succeeded" | "failed" | "unavailable";
+  message: string;
+  started_at?: string;
+  finished_at?: string;
+  exit_code?: number;
+  pid?: number;
+  log_tail?: string;
+};
+
 // Mirror schemas/varroa-annotation-v1.schema.json. Runtime validation is server-side.
 export type ExchangeAnnotation = Omit<Annotation, "className" | "confidence" | "model_version"> & {
   class: "varroa"; confidence: number | null; model_version: string | null;

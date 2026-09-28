@@ -11,6 +11,7 @@ from .models import Document, Candidates, Corners, Effort, PredictionRequest, Re
 from .detector import (
     DetectorUnavailable,
     PredictionFailed,
+    TrainingAlreadyRunning,
     UnknownModel,
     configured_detector,
 )
@@ -315,9 +316,42 @@ def models():
     return {'models': available, 'status': status}
 
 
+@app.get('/api/models/train')
+def training_status():
+    return detector.training_status()
+
+
 @app.post('/api/models/train')
 def train():
-    raise HTTPException(501, 'Training is not implemented. Connect a Detector adapter.')
+    with lock:
+        documents = [Document.model_validate_json(p.read_text('utf-8'))
+                     for p in (ROOT / 'annotations').glob('*.json')]
+        if not documents:
+            raise HTTPException(409, 'Add and review at least one training image first')
+        incomplete = [doc.filename for doc in documents if not doc.review_complete]
+        if incomplete:
+            examples = ', '.join(incomplete[:3])
+            suffix = f' and {len(incomplete) - 3} more' if len(incomplete) > 3 else ''
+            raise HTTPException(
+                409,
+                f'Mark every image review complete before training. Incomplete: {examples}{suffix}',
+            )
+        unnormalized = [doc.filename for doc in documents if doc.coordinate_space != 'canonical']
+        if unnormalized:
+            examples = ', '.join(unnormalized[:3])
+            suffix = f' and {len(unnormalized) - 3} more' if len(unnormalized) > 3 else ''
+            raise HTTPException(
+                409,
+                f'Generate physical perspective correction for every image before training. Missing: {examples}{suffix}',
+            )
+        if any(not point.reviewed for doc in documents for point in doc.annotations):
+            raise HTTPException(409, 'Review every retained annotation before training')
+    try:
+        return detector.start_training(ROOT)
+    except TrainingAlreadyRunning as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except DetectorUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.post('/api/images/{image_id}/predict')

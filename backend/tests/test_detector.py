@@ -1,6 +1,8 @@
 import hashlib
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -125,3 +127,49 @@ def test_predict_reports_training_cli_failure(tmp_path, monkeypatch):
         assert 'contract mismatch' in str(exc)
     else:
         raise AssertionError('Expected the training CLI error to be surfaced')
+
+
+def test_start_training_runs_production_launcher_and_reports_completion(tmp_path, monkeypatch):
+    training = tmp_path / 'training'
+    (training / 'runs').mkdir(parents=True)
+    script = training / 'scripts' / 'train-production.ps1'
+    script.parent.mkdir()
+    script.write_text('Write-Host done', encoding='utf-8')
+    finished = threading.Event()
+    observed = {}
+
+    class FakeProcess:
+        pid = 456
+        def poll(self):
+            return 0 if finished.is_set() else None
+        def wait(self):
+            finished.set()
+            return 0
+
+    def fake_popen(command, **kwargs):
+        observed['command'] = command
+        observed['cwd'] = kwargs['cwd']
+        return FakeProcess()
+
+    monkeypatch.setattr(detector_module.shutil, 'which', lambda name: 'powershell.exe')
+    monkeypatch.setattr(detector_module.subprocess, 'Popen', fake_popen)
+    detector = TrainingRepoDetector(training, Path(sys.executable), {})
+
+    data_root = tmp_path / 'labeling-data'
+    (data_root / 'images').mkdir(parents=True)
+    (data_root / 'annotations').mkdir()
+    (training / 'configs').mkdir()
+    (training / 'configs' / 'labeling.json').write_text('{}', encoding='utf-8')
+    status = detector.start_training(data_root)
+    assert status['state'] == 'running'
+    assert finished.wait(1)
+    assert observed['cwd'] == training.resolve()
+    assert str(script.resolve()) in observed['command']
+    launch_config = Path(observed['command'][-1])
+    config = json.loads(launch_config.read_text(encoding='utf-8'))
+    assert config['images'] == str((data_root / 'images').resolve())
+    assert config['annotations'] == str((data_root / 'annotations').resolve())
+    deadline = time.monotonic() + 1
+    while detector.training_status()['state'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert detector.training_status()['state'] == 'succeeded'

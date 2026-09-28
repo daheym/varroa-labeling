@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
-import type { Doc, ModelRegistry, Point } from "./types";
+import type { Doc, ModelRegistry, Point, TrainingStatus } from "./types";
 
-type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange";
+type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange" | "train";
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const r = await fetch(url, options);
@@ -37,6 +37,7 @@ export default function App() {
   const [trainedModels, setTrainedModels] = useState<ModelRegistry["models"]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [modelStatus, setModelStatus] = useState("loading");
+  const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [normalization, setNormalization] = useState<{pixels_per_mm: number; board_profiles: Record<string, {physical_width_mm: number; physical_height_mm: number}>}>();
   const [boardProfile, setBoardProfile] = useState("");
   const [widthMm, setWidthMm] = useState("");
@@ -69,9 +70,14 @@ export default function App() {
       .then(async () => {
         try {
           setStatus("Saving…");
-          await api(
+          const saved = await api<Doc>(
             `/api/images/${next.image_id}/annotations`,
             json(next, "PUT"),
+          );
+          setList((documents) =>
+            documents.map((document) =>
+              document.image_id === saved.image_id ? saved : document,
+            ),
           );
           if (!pending.current && writes.current === 1) setStatus("Saved");
         } catch (e) {
@@ -237,6 +243,9 @@ export default function App() {
       setList(await api<Doc[]>("/api/images"));
     });
   }
+  async function refreshTrainingStatus() {
+    setTrainingStatus(await api<TrainingStatus>("/api/models/train"));
+  }
   async function deleteCurrentImage() {
     const image = current.current;
     if (
@@ -277,10 +286,28 @@ export default function App() {
   useEffect(() => {
     api<typeof normalization>("/api/normalization").then(setNormalization).catch(e => setError(String(e)));
     void refreshModels().catch(e => setError(String(e)));
+    void refreshTrainingStatus().catch(e => setError(String(e)));
     api<Doc[]>("/api/images")
       .then(setList)
       .catch((e) => setError(String(e)));
   }, []);
+  useEffect(() => {
+    if (trainingStatus?.state !== "running") return;
+    const poll = window.setInterval(() => {
+      void api<TrainingStatus>("/api/models/train")
+        .then(async (next) => {
+          setTrainingStatus(next);
+          if (next.state === "succeeded") {
+            await refreshModels();
+            setStatus("Training complete — new model ready");
+          } else if (next.state === "failed") {
+            setStatus("Training failed");
+          }
+        })
+        .catch((e) => setError(String(e)));
+    }, 2500);
+    return () => window.clearInterval(poll);
+  }, [trainingStatus?.state]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).matches("input,textarea,select")) return;
@@ -1023,6 +1050,85 @@ export default function App() {
                 Each image accepts one prediction batch until its annotations
                 are reset.
               </p>
+            </div>
+          </details>
+
+          <details
+            className="workflow-step"
+            open={activeWorkflowStep === "train"}
+            onToggle={(e) => toggleWorkflowStep("train", e.currentTarget.open)}
+          >
+            <summary>
+              <span className="step-number">6</span>
+              <span className="step-title">Train model</span>
+              <span className="step-status">
+                {trainingStatus?.state === "running"
+                  ? "Running"
+                  : trainingStatus?.state === "succeeded"
+                    ? "Complete"
+                    : trainingStatus?.state === "failed"
+                      ? "Failed"
+                      : trainingStatus?.state === "unavailable"
+                        ? "Unavailable"
+                        : "Ready"}
+              </span>
+            </summary>
+            <div className="workflow-content">
+              <p>
+                Starts the production training workflow in the sibling
+                varroa-training repository. All images must have physical
+                correction and be marked complete; empty completed images are
+                included as negatives.
+              </p>
+              <button
+                disabled={
+                  busy ||
+                  list.length === 0 ||
+                  trainingStatus?.state === "running" ||
+                  trainingStatus?.state === "unavailable"
+                }
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      `Start production training with all ${list.length} dataset images? Training runs in the background and may take a while.`,
+                    )
+                  )
+                    return;
+                  void run(async () => {
+                    await flush();
+                    const documents = await api<Doc[]>("/api/images");
+                    setList(documents);
+                    const next = await api<TrainingStatus>("/api/models/train", {
+                      method: "POST",
+                    });
+                    setTrainingStatus(next);
+                    setActiveWorkflowStep("train");
+                    setStatus("Training started in background");
+                  });
+                }}
+              >
+                Start training
+              </button>
+              <p role="status">
+                {trainingStatus?.message || "Checking training availability…"}
+              </p>
+              {trainingStatus?.started_at && (
+                <p>
+                  Started: {new Date(trainingStatus.started_at).toLocaleString()}
+                  {trainingStatus.finished_at && (
+                    <>
+                      <br />
+                      Finished: {new Date(trainingStatus.finished_at).toLocaleString()}
+                    </>
+                  )}
+                </p>
+              )}
+              {trainingStatus?.log_tail && (
+                <details className="sidebar-subsection">
+                  <summary>Training log</summary>
+                  <pre className="training-log">{trainingStatus.log_tail}</pre>
+                </details>
+              )}
             </div>
           </details>
 

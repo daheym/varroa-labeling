@@ -70,10 +70,37 @@ def test_perspective_metadata_and_original(client):
 def test_validation_and_placeholders(client):
     doc = upload(client)
     assert client.get('/api/models').json() == {'models': [], 'status': 'unconfigured'}
-    assert client.post('/api/models/train').status_code == 501
+    assert client.get('/api/models/train').json()['state'] == 'unavailable'
+    assert client.post('/api/models/train').status_code == 409
+    doc['review_complete'] = True
+    assert client.put(f"/api/images/{doc['image_id']}/annotations", json=doc).status_code == 200
+    assert client.post('/api/models/train').status_code == 503
     assert client.post(f"/api/images/{doc['image_id']}/predict", json={'model_id': 'missing'}).status_code == 503
     assert client.get('/api/images/not-an-id').status_code == 404
     assert client.post('/api/images', files={'file': ('bad.png', b'bad', 'image/png')}).status_code == 415
+
+
+def test_start_training_requires_complete_normalized_dataset(client, monkeypatch):
+    doc = upload(client)
+
+    class FakeTrainer:
+        status = 'ready'
+        def models(self): return []
+        def training_status(self): return {'state': 'idle', 'message': 'Ready'}
+        def start_training(self, data_root):
+            assert data_root == main.ROOT
+            return {'state': 'running', 'message': 'Started', 'pid': 123}
+
+    monkeypatch.setattr(main, 'detector', FakeTrainer())
+    response = client.post('/api/models/train')
+    assert response.status_code == 409
+    assert 'Mark every image review complete' in response.json()['detail']
+
+    doc['review_complete'] = True
+    assert client.put(f"/api/images/{doc['image_id']}/annotations", json=doc).status_code == 200
+    response = client.post('/api/models/train')
+    assert response.status_code == 200
+    assert response.json()['state'] == 'running'
 
 
 def test_predict_uses_selected_model_and_persists_candidates(client, monkeypatch):
