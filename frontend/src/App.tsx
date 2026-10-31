@@ -1,22 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
-import type { Doc, ModelRegistry, Point, TrainingStatus } from "./types";
+import type { Doc, ModelRegistry, Point, PredictionStatus, TrainingStatus } from "./types";
+import { api, json } from "./api";
+import { followPrediction, requestPrediction } from "./prediction";
 
 type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange" | "train";
 
-async function api<T>(url: string, options?: RequestInit): Promise<T> {
-  const r = await fetch(url, options);
-  if (!r.ok) {
-    const body = await r.json().catch(() => null);
-    throw new Error(body?.detail || `Request failed (${r.status})`);
-  }
-  return r.json();
-}
-const json = (data: unknown, method = "POST") => ({
-  method,
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(data),
-});
 export default function App() {
   const [list, setList] = useState<Doc[]>([]),
     [doc, setDoc] = useState<Doc | null>(null),
@@ -29,6 +18,7 @@ export default function App() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const [corrected, setCorrected] = useState(false);
+  const [annotationsVisible, setAnnotationsVisible] = useState(true);
   const editable = corrected || doc?.coordinate_space === "original";
   const [exchangeDirectory, setExchangeDirectory] = useState("");
   const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
@@ -38,6 +28,8 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState("");
   const [modelStatus, setModelStatus] = useState("loading");
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+  const [predictionStatus, setPredictionStatus] = useState<PredictionStatus | null>(null);
+  const [predictionSeconds, setPredictionSeconds] = useState(0);
   const [normalization, setNormalization] = useState<{pixels_per_mm: number; board_profiles: Record<string, {physical_width_mm: number; physical_height_mm: number}>}>();
   const [boardProfile, setBoardProfile] = useState("");
   const [widthMm, setWidthMm] = useState("");
@@ -49,6 +41,7 @@ export default function App() {
     writes = useRef(0),
     timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
     chain = useRef<Promise<void>>(Promise.resolve()),
+    operationRunning = useRef(false),
     lastAction = useRef(Date.now());
   function show(d: Doc) {
     current.current = d;
@@ -58,6 +51,10 @@ export default function App() {
     setActiveWorkflowStep((active) =>
       isOpen ? step : active === step ? null : active,
     );
+  }
+  function toggleAnnotations() {
+    setAnnotationsVisible((visible) => !visible);
+    select(null);
   }
   function flush(): Promise<void> {
     clearTimeout(timer.current);
@@ -137,7 +134,7 @@ export default function App() {
   }
   function remove() {
     const d = current.current;
-    if (!d || !selected || !(corrected || d.coordinate_space === "original")) return;
+    if (!d || !selected || !annotationsVisible || !(corrected || d.coordinate_space === "original")) return;
     const a = d.annotations.find((a) => a.id === selected);
     if (!a) return;
     commit(
@@ -154,6 +151,8 @@ export default function App() {
     select(null);
   }
   async function run(fn: () => Promise<void>) {
+    if (operationRunning.current) return;
+    operationRunning.current = true;
     setBusy(true);
     setError("");
     try {
@@ -161,6 +160,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      operationRunning.current = false;
       setBusy(false);
     }
   }
@@ -178,6 +178,7 @@ export default function App() {
     await flush();
     const d = await api<Doc>(`/api/images/${id}`);
     show(d);
+    setPredictionStatus(null);
     past.current = [];
     future.current = [];
     select(null);
@@ -196,6 +197,32 @@ export default function App() {
           : "prepare",
     );
     lastAction.current = Date.now();
+    const job = await api<PredictionStatus>(`/api/images/${id}/prediction`);
+    if (job.state === "running") await receivePrediction(id, job);
+  }
+  async function receivePrediction(imageId: string, existing?: PredictionStatus) {
+    const started_at = existing?.started_at || new Date().toISOString();
+    setPredictionStatus({ state: "running", message: "Saving annotations before prediction…", started_at });
+    setPredictionSeconds(0);
+    try {
+      await flush();
+      const update = (job: PredictionStatus) => setPredictionStatus({ ...job, started_at: job.started_at || started_at });
+      const updated = existing
+        ? await followPrediction(imageId, existing, update)
+        : await requestPrediction(imageId, selectedModel, update);
+      show(updated);
+      setList((items) => items.map((item) => item.image_id === imageId ? updated : item));
+      past.current = [];
+      future.current = [];
+      select(null);
+      const message = `${updated.annotations.filter((a) => a.source === "model").length} predictions ready for review`;
+      setPredictionStatus({ state: "succeeded", message, started_at });
+      setStatus(message);
+    } catch (e) {
+      setPredictionStatus({ state: "failed", message: e instanceof Error ? e.message : String(e), started_at });
+      setStatus("Prediction failed");
+      throw e;
+    }
   }
   async function resetAnnotations(all: boolean) {
     if (all) {
@@ -236,6 +263,7 @@ export default function App() {
         future.current = [];
       }
       select(null);
+      setPredictionStatus(null);
       setReviewStats(null);
       setActiveWorkflowStep(current.current ? "annotate" : "image");
       lastAction.current = Date.now();
@@ -264,6 +292,7 @@ export default function App() {
         { method: "DELETE" },
       );
       current.current = null;
+      setPredictionStatus(null);
       setDoc(null);
       pending.current = null;
       past.current = [];
@@ -292,6 +321,14 @@ export default function App() {
       .catch((e) => setError(String(e)));
   }, []);
   useEffect(() => {
+    if (predictionStatus?.state !== "running" || !predictionStatus.started_at) return;
+    const startedAt = Date.parse(predictionStatus.started_at);
+    const tick = () => setPredictionSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [predictionStatus?.state, predictionStatus?.started_at]);
+  useEffect(() => {
     if (trainingStatus?.state !== "running") return;
     const poll = window.setInterval(() => {
       void api<TrainingStatus>("/api/models/train")
@@ -310,7 +347,15 @@ export default function App() {
   }, [trainingStatus?.state]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).matches("input,textarea,select")) return;
+      if ((e.target as HTMLElement).closest("input,textarea,select,[contenteditable]:not([contenteditable='false'])")) return;
+      if (
+        e.code === "KeyH" && !e.ctrlKey && !e.metaKey && !e.altKey &&
+        !e.repeat && !e.isComposing && doc && !busy
+      ) {
+        e.preventDefault();
+        toggleAnnotations();
+        return;
+      }
       if (e.code === "Space") {
         e.preventDefault();
         setSpace(true);
@@ -356,7 +401,7 @@ export default function App() {
         <h1>
           Varroa <span>dataset annotation</span>
         </h1>
-        <span role="status">{busy ? "Working…" : status}</span>
+        <span role="status">{busy ? predictionStatus?.state === "running" ? "Predicting…" : "Working…" : status}</span>
         <button
           disabled={busy}
           onClick={() =>
@@ -740,22 +785,9 @@ export default function App() {
                           !!doc.model_version ||
                           doc.coordinate_space !== "canonical"
                         }
-                        onClick={() =>
-                          void run(async () => {
-                            await flush();
-                            const updated = await api<Doc>(
-                              `/api/images/${doc.image_id}/predict`,
-                              json({ model_id: selectedModel }),
-                            );
-                            show(updated);
-                            past.current = [];
-                            future.current = [];
-                            select(null);
-                            setStatus("Predictions ready for review");
-                          })
-                        }
+                        onClick={() => void run(() => receivePrediction(doc.image_id))}
                       >
-                        Request predictions
+                        {predictionStatus?.state === "running" ? "Predicting…" : "Request predictions"}
                       </button>
                     </div>
                     {trainedModels.length === 0 && modelStatus !== "loading" && (
@@ -1182,6 +1214,8 @@ export default function App() {
                   <br />
                   Mouse wheel: zoom; Space + drag: pan
                   <br />
+                  H: hide / show annotations
+                  <br />
                   Ctrl/Cmd+Z: undo; Ctrl/Cmd+Shift+Z: redo
                   <br />
                   Delete/Backspace: delete selected
@@ -1194,6 +1228,21 @@ export default function App() {
           className="canvas-panel"
           style={{ pointerEvents: busy ? "none" : undefined }}
         >
+          {predictionStatus && (
+            <div className={`prediction-status prediction-${predictionStatus.state}`} role="status" aria-live="polite">
+              {predictionStatus.state !== "running" && (
+                <button className="prediction-dismiss" aria-label="Dismiss prediction status" onClick={() => setPredictionStatus(null)}>×</button>
+              )}
+              <strong>{predictionStatus.state === "running" ? "Prediction in progress" : predictionStatus.state === "failed" ? "Prediction failed" : "Prediction complete"}</strong>
+              <p>{predictionStatus.message}</p>
+              {predictionStatus.state === "running" && (
+                <>
+                  <div className="prediction-activity" role="progressbar" aria-label="Prediction in progress"><span /></div>
+                  <small aria-live="off">Elapsed: {Math.floor(predictionSeconds / 60)}:{String(predictionSeconds % 60).padStart(2, "0")}</small>
+                </>
+              )}
+            </div>
+          )}
           {doc ? (
             <Canvas
               doc={doc}
@@ -1202,10 +1251,12 @@ export default function App() {
               space={space}
               perspective={perspective}
               corrected={corrected}
+              annotationsVisible={annotationsVisible}
+              toggleAnnotations={toggleAnnotations}
               corners={corners}
               setCorners={setCorners}
               add={(p) => {
-                if (!editable) return;
+                if (!editable || !annotationsVisible) return;
                 const a = {
                   ...p,
                   id: crypto.randomUUID(),

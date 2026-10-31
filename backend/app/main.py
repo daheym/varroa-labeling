@@ -2,12 +2,14 @@ import json
 import os
 import uuid
 import threading
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from .models import Document, Candidates, Corners, Effort, PredictionRequest, ResetConfirmation
+from .models import Document, Candidates, Corners, Effort, PredictionRequest, PredictionJobRequest, ResetConfirmation
 from .detector import (
     DetectorUnavailable,
     PredictionFailed,
@@ -26,6 +28,8 @@ for folder in ('images', 'corrected', 'annotations'):
 app = FastAPI(title='Varroa annotation API')
 lock = threading.RLock()
 detector = configured_detector(NORMALIZATION)
+prediction_jobs = {}
+prediction_lock = threading.Lock()
 
 
 def path(image_id):
@@ -385,6 +389,62 @@ def predict(image_id: str, payload: PredictionRequest):
                 or current.perspective.get('file') != perspective_file):
             raise HTTPException(409, 'Image perspective changed during prediction; request predictions again')
         return candidates(image_id, result)
+
+
+def finish_prediction(job, payload):
+    try:
+        predict(job['image_id'], payload)
+        update = {'state': 'succeeded', 'message': 'Predictions ready for review'}
+    except HTTPException as exc:
+        update = {'state': 'failed', 'message': str(exc.detail), 'error_status': exc.status_code}
+    except Exception:
+        logging.getLogger(__name__).exception('Prediction failed for %s', job['image_id'])
+        update = {'state': 'failed', 'message': 'Prediction failed unexpectedly. Check the API server log.',
+                  'error_status': 500}
+    with prediction_lock:
+        job.update(update, finished_at=datetime.now(timezone.utc).isoformat())
+
+
+@app.get('/api/images/{image_id}/prediction')
+def prediction_status(image_id: str, request_id: uuid.UUID | None = None):
+    read(image_id)
+    with prediction_lock:
+        job = prediction_jobs.get(image_id)
+        if not job or (request_id is not None and job['request_id'] != str(request_id)):
+            return {'state': 'idle', 'message': 'No prediction job is running.'}
+        return dict(job)
+
+
+@app.post('/api/images/{image_id}/prediction', status_code=202)
+def start_prediction(image_id: str, payload: PredictionJobRequest):
+    # Short, idempotent start requests can be retried if the connection drops.
+    # Keep the latest job per image; inference never depends on an open HTTP socket.
+    with prediction_lock, lock:
+        doc = read(image_id)
+        previous = prediction_jobs.get(image_id)
+        if previous and previous['request_id'] == str(payload.request_id):
+            if previous['model_id'] != payload.model_id:
+                raise HTTPException(409, 'A prediction request ID cannot select a different model')
+            return dict(previous)
+        if previous and previous['state'] == 'running':
+            raise HTTPException(409, 'A prediction is already running for this image')
+        if doc.coordinate_space != 'canonical' or not doc.perspective:
+            raise HTTPException(409, 'Generate physical perspective correction before requesting predictions')
+        if doc.model_version is not None:
+            raise HTTPException(409, 'This image already has a prediction batch')
+        job = {
+            'request_id': str(payload.request_id), 'image_id': image_id, 'model_id': payload.model_id,
+            'state': 'running', 'message': 'Loading model and analyzing image. Large images may take several minutes.',
+            'started_at': datetime.now(timezone.utc).isoformat(),
+        }
+        prediction_jobs[image_id] = job
+        try:
+            threading.Thread(target=finish_prediction, args=(job, payload),
+                             name=f'varroa-prediction-{image_id}', daemon=True).start()
+        except RuntimeError as exc:
+            prediction_jobs.pop(image_id, None)
+            raise HTTPException(503, 'Could not start prediction worker; try again') from exc
+        return dict(job)
 
 
 # Linked directories are deliberately local filesystem operations, like the existing data store.

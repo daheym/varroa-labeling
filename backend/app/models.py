@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -55,6 +56,10 @@ class Candidates(BaseModel):
 
 class PredictionRequest(BaseModel):
     model_id: str = Field(min_length=1)
+
+
+class PredictionJobRequest(PredictionRequest):
+    request_id: UUID
 
 
 class Corners(BaseModel):

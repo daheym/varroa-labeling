@@ -19,6 +19,8 @@ type Props = {
   perspective: boolean;
   space: boolean;
   corrected: boolean;
+  annotationsVisible: boolean;
+  toggleAnnotations: () => void;
 };
 export default function Canvas(p: Props) {
   const editable = p.corrected || p.doc.coordinate_space === "original";
@@ -68,9 +70,23 @@ export default function Canvas(p: Props) {
   useEffect(fit, [p.doc.image_id, width, height, p.corrected, size.width, size.height]);
   return (
     <div className="canvas-wrap" ref={container}>
-      <button className="fit" onClick={fit}>
-        {p.corrected ? "Corrected" : "Original"} / Fit image · {Math.round(view.scale * 100)}%
-      </button>
+      <div className="canvas-toolbar">
+        <button
+          type="button"
+          aria-pressed={p.annotationsVisible}
+          aria-keyshortcuts="H"
+          title="Hide or show annotation markers (H)"
+          onClick={p.toggleAnnotations}
+        >
+          {p.annotationsVisible ? "Hide annotations" : "Show annotations"} (H)
+        </button>
+        <button type="button" onClick={fit}>
+          {p.corrected ? "Corrected" : "Original"} / Fit image · {Math.round(view.scale * 100)}%
+        </button>
+        {!p.annotationsVisible && (
+          <span role="status">Annotations hidden — show to add or move labels</span>
+        )}
+      </div>
       {!image && (
         <div className="canvas-message">
           {error || "Loading full-resolution image…"}
@@ -84,7 +100,7 @@ export default function Canvas(p: Props) {
         scaleX={view.scale}
         scaleY={view.scale}
         draggable={p.space}
-        style={{ cursor: p.space ? "grab" : "crosshair" }}
+        style={{ cursor: p.space ? "grab" : p.perspective || (editable && p.annotationsVisible) ? "crosshair" : "default" }}
         onDragEnd={(e) => {
           if (e.target === e.target.getStage())
             setView((v) => ({ ...v, x: e.target.x(), y: e.target.y() }));
@@ -115,7 +131,7 @@ export default function Canvas(p: Props) {
             return;
           if (p.perspective) {
             if (p.corners.length < 4) p.setCorners([...p.corners, point]);
-          } else if (editable) p.add(point);
+          } else if (editable && p.annotationsVisible) p.add(point);
         }}
       >
         <Layer>
@@ -127,7 +143,7 @@ export default function Canvas(p: Props) {
           />
         </Layer>
         <Layer>
-          {editable &&
+          {editable && p.annotationsVisible &&
             p.doc.annotations.map((a) => (
               <Circle
                 key={a.id}

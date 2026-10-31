@@ -1,5 +1,8 @@
 import io
 import json
+import threading
+import time
+import uuid
 import numpy as np
 import pytest
 from PIL import Image
@@ -14,7 +17,94 @@ def client(tmp_path, monkeypatch):
     for folder in ('images', 'annotations', 'corrected'):
         (tmp_path / folder).mkdir()
     monkeypatch.setattr(main, 'detector', UnconfiguredDetector())
+    monkeypatch.setattr(main, 'prediction_jobs', {})
     return TestClient(main.app)
+
+
+def wait_prediction(client, image_id):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        job = client.get(f'/api/images/{image_id}/prediction').json()
+        if job['state'] != 'running':
+            return job
+        time.sleep(.01)
+    raise AssertionError('Prediction worker did not finish')
+
+
+def test_prediction_job_retries_do_not_duplicate_inference(client, monkeypatch):
+    from backend.app.models import Annotation, Candidates
+    doc = upload(client)
+    base = f"/api/images/{doc['image_id']}"
+    release = threading.Event()
+    calls = []
+
+    class FakeDetector:
+        def predict(self, image_path, *, perspective, model_id):
+            calls.append(model_id)
+            assert release.wait(3)
+            return Candidates(model_version='test-v1', coordinate_space='canonical',
+                              perspective_file=perspective['file'], annotations=[
+                                  Annotation(id='pred-1', x=12, y=20, source='model', confidence=.8)])
+
+    monkeypatch.setattr(main, 'detector', FakeDetector())
+    payload = {'model_id': 'test', 'request_id': str(uuid.uuid4())}
+    try:
+        response = client.post(base + '/prediction', json=payload)
+        assert response.status_code == 202
+        assert response.json()['state'] == 'running'
+        assert client.get(base + '/prediction').json()['request_id'] == payload['request_id']
+        assert client.post(base + '/prediction', json=payload).json()['request_id'] == payload['request_id']
+        assert client.post(base + '/prediction', json={**payload, 'request_id': str(uuid.uuid4())}).status_code == 409
+        assert client.post(base + '/prediction', json={**payload, 'model_id': 'other'}).status_code == 409
+    finally:
+        release.set()
+        job = wait_prediction(client, doc['image_id'])
+    assert job['state'] == 'succeeded'
+    assert job['finished_at'] >= job['started_at']
+    assert client.post(base + '/prediction', json=payload).json()['state'] == 'succeeded'
+    assert calls == ['test']
+    saved = client.get(base).json()
+    assert saved['model_version'] == 'test-v1'
+    assert len(saved['annotations']) == 1
+
+
+def test_failed_prediction_job_reports_error_and_allows_new_attempt(client, monkeypatch):
+    from backend.app.detector import PredictionFailed
+    from backend.app.models import Candidates
+    doc = upload(client)
+    base = f"/api/images/{doc['image_id']}"
+    calls = []
+
+    class FakeDetector:
+        def predict(self, image_path, *, perspective, model_id):
+            calls.append(model_id)
+            if len(calls) == 1:
+                raise PredictionFailed('Model failed to load')
+            return Candidates(model_version='test-v1', coordinate_space='canonical',
+                              perspective_file=perspective['file'], annotations=[])
+
+    monkeypatch.setattr(main, 'detector', FakeDetector())
+    payload = {'model_id': 'test', 'request_id': str(uuid.uuid4())}
+    assert client.post(base + '/prediction', json=payload).status_code == 202
+    failed = wait_prediction(client, doc['image_id'])
+    assert failed['state'] == 'failed'
+    assert failed['message'] == 'Model failed to load'
+    assert failed['error_status'] == 422
+    assert client.get(base).json()['model_version'] is None
+    assert client.post(base + '/prediction', json=payload).json()['state'] == 'failed'
+    assert len(calls) == 1
+    payload['request_id'] = str(uuid.uuid4())
+    assert client.post(base + '/prediction', json=payload).status_code == 202
+    assert wait_prediction(client, doc['image_id'])['state'] == 'succeeded'
+    assert len(calls) == 2
+
+
+def test_prediction_job_requires_correction_and_valid_request_id(client):
+    doc = upload(client, corrected=False)
+    base = f"/api/images/{doc['image_id']}/prediction"
+    assert client.get(base).json()['state'] == 'idle'
+    assert client.post(base, json={'model_id': 'test', 'request_id': str(uuid.uuid4())}).status_code == 409
+    assert client.post(base, json={'model_id': 'test', 'request_id': 'invalid'}).status_code == 422
 
 
 def upload(client, corrected=True):

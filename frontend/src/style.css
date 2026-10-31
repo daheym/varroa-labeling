@@ -145,11 +145,83 @@ p {
   background: #0c1015;
   position: relative;
 }
-.fit {
+.prediction-status {
+  position: absolute;
+  z-index: 3;
+  top: 70px;
+  left: 16px;
+  width: min(380px, calc(100% - 32px));
+  padding: 14px 16px;
+  border: 1px solid #79a8ce;
+  border-radius: 6px;
+  background: #1c232df2;
+  box-shadow: 0 4px 18px #0006;
+  pointer-events: none;
+}
+.prediction-status p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.prediction-dismiss {
+  float: right;
+  margin: -6px -8px 0 8px;
+  padding: 2px 6px;
+  pointer-events: auto;
+}
+.prediction-status small {
+  display: block;
+  margin-top: 8px;
+  color: #c6d2df;
+  font-variant-numeric: tabular-nums;
+}
+.prediction-failed {
+  border-color: #c45c5c;
+}
+.prediction-succeeded {
+  border-color: #65b38b;
+}
+.prediction-activity {
+  height: 6px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #38414e;
+}
+.prediction-activity span {
+  display: block;
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: #8fcfff;
+  animation: prediction-activity 1.6s ease-in-out infinite alternate;
+}
+@keyframes prediction-activity {
+  from { transform: translateX(0); }
+  to { transform: translateX(185%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prediction-activity span { animation: none; width: 100%; }
+}
+.canvas-toolbar {
   position: absolute;
   z-index: 2;
   right: 16px;
   top: 12px;
+  left: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+.canvas-toolbar button {
+  pointer-events: auto;
+}
+.canvas-toolbar [role="status"] {
+  flex-basis: 100%;
+  text-align: right;
+  color: #e5eaf0;
+  font-size: 12px;
 }
 .empty,
 .canvas-message {
