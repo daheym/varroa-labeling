@@ -48,6 +48,9 @@ sibling training repository. It shows a dense grid of individual 96px mite conte
 crops, with adjustable display size and filters for run, source image, training or
 validation membership, discrepancies and current label status. Click a crop to enlarge
 it, inspect confidence and individual tile outcomes, or open its source image.
+Switching between **Annotate** and **Mite overview** preserves the selected run,
+filters, crop size, and overview page for the current app session. Returning to the
+overview reloads current label and review information with those settings.
 Each annotation appears once; overlapping tiles may give mixed results and may
 put an object in both train and validation. Unmatched predictions are shown too
 and can repeat across overlapping tiles. Colors describe agreement with saved
@@ -81,9 +84,12 @@ membership, review badges, and what each review action changes. Filter explanati
 update with your selection, and crop details include the result meaning and suggested
 next step.
 
-**Open source image** makes annotation markers visible and zooms to the matching
-current label, with its coordinates shown above the canvas. If there is no label
-at the saved crop center, the status message says so. Run results refer to the saved
+**Open source image** makes annotation markers visible and zooms to the saved crop
+center, including unmatched predictions without a current label. An existing label
+is selected; otherwise a temporary orange ring and crosshair identify the location,
+with coordinates shown above the canvas. **Center overview location** returns to it
+after panning or fitting the image. **Clear location guide** dismisses the guide;
+it is not saved as an annotation. Run results refer to the saved
 annotation snapshot; a label marked reviewed can still be mistaken.
 
 For an existing annotation, choose **Not a mite — remove label**, then confirm the

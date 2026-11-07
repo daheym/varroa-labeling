@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
-import MiteOverview from "./MiteOverview";
-import type { Doc, ModelRegistry, Point, PredictionStatus, TrainingStatus } from "./types";
+import MiteOverview, { initialOverviewView } from "./MiteOverview";
+import type { Doc, ModelRegistry, Point, PredictionStatus, SourceFocus, TrainingStatus } from "./types";
 import { api, json } from "./api";
 import { followPrediction, requestPrediction } from "./prediction";
 
@@ -9,6 +9,7 @@ type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange" | "
 
 export default function App() {
   const [page, setPage] = useState<"annotate" | "overview">("annotate");
+  const [overviewView, setOverviewView] = useState(initialOverviewView);
   const [list, setList] = useState<Doc[]>([]),
     [doc, setDoc] = useState<Doc | null>(null),
     [selected, select] = useState<string | null>(null),
@@ -21,7 +22,7 @@ export default function App() {
     [busy, setBusy] = useState(false);
   const [corrected, setCorrected] = useState(false);
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
-  const [focusLabel, setFocusLabel] = useState<{ imageId: string; annotationId: string; requestId: string } | null>(null);
+  const [focusTarget, setFocusTarget] = useState<SourceFocus | null>(null);
   const editable = corrected || doc?.coordinate_space === "original";
   const [exchangeDirectory, setExchangeDirectory] = useState("");
   const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
@@ -180,7 +181,7 @@ export default function App() {
   async function load(id: string) {
     await flush();
     const d = await api<Doc>(`/api/images/${id}`);
-    setFocusLabel(null);
+    setFocusTarget(null);
     show(d);
     setPredictionStatus(null);
     past.current = [];
@@ -447,7 +448,7 @@ export default function App() {
           <button onClick={() => setError("")}>Dismiss</button>
         </div>
       )}
-      {page === "overview" ? <MiteOverview refreshKey={trainingStatus?.finished_at} savingChanged={setBusy} documentUpdated={(updated, annotationId) => {
+      {page === "overview" ? <MiteOverview view={overviewView} setView={setOverviewView} refreshKey={trainingStatus?.finished_at} savingChanged={setBusy} documentUpdated={(updated, annotationId) => {
         setList(items => items.map(item => item.image_id === updated.image_id ? updated : item));
         if (current.current?.image_id === updated.image_id) {
           show(updated);
@@ -463,10 +464,11 @@ export default function App() {
         select(annotation?.id || null);
         setAnnotationsVisible(true);
         setActiveWorkflowStep("annotate");
-        setFocusLabel(annotation ? { imageId: item.source_id, annotationId: annotation.id, requestId: crypto.randomUUID() } : null);
+        setFocusTarget({ imageId: item.source_id, annotationId: annotation?.id || null,
+          x: item.x, y: item.y, requestId: crypto.randomUUID() });
         setStatus(annotation
           ? `Located current label at ${annotation.x.toFixed(1)}, ${annotation.y.toFixed(1)}`
-          : "No current label at this saved crop center. The run snapshot may differ from the current annotations.");
+          : `Located overview position at ${item.x.toFixed(1)}, ${item.y.toFixed(1)} — orange guide marks the location; no annotation selected.`);
         setPage("annotate");
       })} /> : <div className="workspace">
         <aside>
@@ -1316,7 +1318,8 @@ export default function App() {
               corrected={corrected}
               annotationsVisible={annotationsVisible}
               toggleAnnotations={toggleAnnotations}
-              focusLabel={focusLabel}
+              focusTarget={focusTarget}
+              clearFocus={() => setFocusTarget(null)}
               corners={corners}
               setCorners={setCorners}
               add={(p) => {

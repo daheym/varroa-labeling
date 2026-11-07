@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KImage, Circle, Line, Text, Shape } from "react-konva";
+import { Stage, Layer, Group, Image as KImage, Circle, Line, Text, Shape } from "react-konva";
 import {
   screenToImage,
   zoomAt,
@@ -8,7 +8,7 @@ import {
   viewAroundPoint,
   type View,
 } from "./coordinates";
-import type { Doc, Point } from "./types";
+import type { Doc, Point, SourceFocus } from "./types";
 type Props = {
   doc: Doc;
   selected: string | null;
@@ -22,7 +22,8 @@ type Props = {
   corrected: boolean;
   annotationsVisible: boolean;
   toggleAnnotations: () => void;
-  focusLabel: { imageId: string; annotationId: string; requestId: string } | null;
+  focusTarget: SourceFocus | null;
+  clearFocus: () => void;
 };
 export default function Canvas(p: Props) {
   const editable = p.corrected || p.doc.coordinate_space === "original";
@@ -33,6 +34,8 @@ export default function Canvas(p: Props) {
   const [image, setImage] = useState<HTMLImageElement>();
   const [error, setError] = useState("");
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
+  const focusTarget = editable && p.focusTarget?.imageId === p.doc.image_id
+    && inside(p.focusTarget, width, height) ? p.focusTarget : null;
   const fit = () => {
     const scale =
       Math.min(
@@ -71,10 +74,8 @@ export default function Canvas(p: Props) {
   }, [p.doc.image_id, p.corrected, p.doc.perspective?.file]);
   useEffect(fit, [p.doc.image_id, width, height, p.corrected, size.width, size.height]);
   useEffect(() => {
-    if (!editable || p.focusLabel?.imageId !== p.doc.image_id) return;
-    const annotation = p.doc.annotations.find(a => a.id === p.focusLabel?.annotationId);
-    if (annotation) setView(viewAroundPoint(annotation, size));
-  }, [p.focusLabel, p.doc.image_id, editable, size.width, size.height]);
+    if (focusTarget) setView(viewAroundPoint(focusTarget, size));
+  }, [focusTarget, size.width, size.height]);
   const selectedLabel = p.doc.annotations.find(a => a.id === p.selected);
   return (
     <div className="canvas-wrap" ref={container}>
@@ -97,6 +98,13 @@ export default function Canvas(p: Props) {
         {p.annotationsVisible && selectedLabel && <span role="status">
           Selected label: {selectedLabel.x.toFixed(1)}, {selectedLabel.y.toFixed(1)} · {selectedLabel.reviewed ? "marked reviewed" : "awaiting review"}
         </span>}
+        {focusTarget && <>
+          <button type="button" onClick={() => setView(viewAroundPoint(focusTarget, size))}>Center overview location</button>
+          {!focusTarget.annotationId && <>
+            <span role="status">Overview location: {focusTarget.x.toFixed(1)}, {focusTarget.y.toFixed(1)} · temporary orange guide</span>
+            <button type="button" onClick={p.clearFocus}>Clear location guide</button>
+          </>}
+        </>}
       </div>
       {!image && (
         <div className="canvas-message">
@@ -197,6 +205,15 @@ export default function Canvas(p: Props) {
                 }}
               />
             ))}
+          {focusTarget && !focusTarget.annotationId && p.annotationsVisible && <Group
+            name="overview-location-guide" x={focusTarget.x} y={focusTarget.y} listening={false}
+          >
+            <Circle radius={14 / view.scale} stroke="#000" strokeWidth={5 / view.scale} />
+            <Circle radius={14 / view.scale} stroke="#ffb347" strokeWidth={2 / view.scale} dash={[4 / view.scale, 3 / view.scale]} />
+            {[[-24, 0, -17, 0], [17, 0, 24, 0], [0, -24, 0, -17], [0, 17, 0, 24]].map((segment, index) => <Line
+              key={index} points={segment.map(value => value / view.scale)} stroke="#ffb347" strokeWidth={2 / view.scale}
+            />)}
+          </Group>}
           {!p.corrected && (
             <>
               {p.corners.length === 4 && <Shape listening={false} sceneFunc={(ctx, shape) => {

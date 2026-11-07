@@ -1,4 +1,9 @@
 export type Point = { x: number; y: number };
+export type SourceFocus = Point & {
+  imageId: string;
+  annotationId: string | null;
+  requestId: string;
+};
 export type Annotation = Point & {
   id: string;
   className: "varroa";

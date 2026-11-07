@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { api, json } from "./api";
 import type { Doc } from "./types";
 
@@ -13,6 +13,12 @@ type Overview = { run_name: string; interpretation: string; note: string; items:
   confirmed_predictions: Record<string, string>; prediction_reviews: Record<string, PredictionReview>;
   annotation_states: Record<string, AnnotationState> };
 type Run = { id: string; name: string; ready: boolean };
+export type OverviewView = {
+  runId: string; result: string; split: string; source: string; quality: string; size: number; page: number;
+};
+export const initialOverviewView: OverviewView = {
+  runId: "", result: "", split: "", source: "", quality: "", size: 88, page: 0,
+};
 const names: Record<string, string> = { matched: "Matched", missed: "Missed", mixed: "Mixed outcomes",
   extra: "Unmatched prediction", not_evaluated: "Not evaluated" };
 const resultHelp: Record<string, { color: string; meaning: string; action: string }> = {
@@ -61,25 +67,23 @@ export function predictionReviewStatus(item: { id: string; kind: string },
   return reviews[item.id]?.decision === "not_mite" ? "not_mite" : "unreviewed";
 }
 
-export default function MiteOverview({ openSource, documentUpdated, savingChanged, refreshKey }: {
+export default function MiteOverview({ view, setView, openSource, documentUpdated, savingChanged, refreshKey }: {
+  view: OverviewView; setView: Dispatch<SetStateAction<OverviewView>>;
   openSource: (item: { source_id: string; x: number; y: number }) => void;
   documentUpdated: (doc: Doc, annotationId: string | null) => void;
   savingChanged: (saving: boolean) => void; refreshKey?: string;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
-  const [runId, setRunId] = useState("");
+  const { runId, result, split, source, quality, size, page } = view;
+  function updateView(patch: Partial<OverviewView>) {
+    setView(previous => ({ ...previous, ...patch }));
+  }
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [result, setResult] = useState("");
-  const [split, setSplit] = useState("");
-  const [source, setSource] = useState("");
-  const [quality, setQuality] = useState("");
-  const [size, setSize] = useState(88);
-  const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Item | null>(null);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -89,12 +93,13 @@ export default function MiteOverview({ openSource, documentUpdated, savingChange
     const controller = new AbortController();
     api<Run[]>("/api/inspection/runs", { signal: controller.signal }).then(next => {
       setRuns(next);
-      setRunId(previous => next.some(run => run.id === previous) ? previous : next[0]?.id || "");
+      setView(previous => next.some(run => run.id === previous.runId) ? previous
+        : { ...previous, runId: next[0]?.id || "", source: "", page: 0 });
     }).catch(e => { if (!controller.signal.aborted) setError(String(e)); });
     return () => controller.abort();
-  }, [revision, refreshKey]);
+  }, [revision, refreshKey, setView]);
   useEffect(() => {
-    setData(null); setSelected(null); setConfirmRemoval(false); setPage(0); setSource(""); setError(""); setNotice("");
+    setData(null); setSelected(null); setConfirmRemoval(false); setError(""); setNotice("");
     if (!runId || !currentRun?.ready) { setLoading(false); return; }
     const controller = new AbortController();
     setLoading(true);
@@ -200,26 +205,26 @@ export default function MiteOverview({ openSource, documentUpdated, savingChange
     <div className="overview-heading"><div><h2>Mite overview</h2><p>Inspect individual mites across a training run. Click any crop to review and update its current label.</p></div>
       <button disabled={loading || saving} onClick={() => setRevision(value => value + 1)}>Refresh runs</button></div>
     <div className="overview-controls">
-      <label className="run-select">Training run<select value={runId} disabled={loading || saving} onChange={e => setRunId(e.target.value)}>
+      <label className="run-select">Training run<select value={runId} disabled={loading || saving} onChange={e => updateView({ runId: e.target.value, source: "", page: 0 })}>
         {runs.map(run => <option key={run.id} value={run.id}>{run.name}{run.ready ? "" : " (overview not built)"}</option>)}
       </select></label>
-      <label>Result<select value={result} aria-describedby="overview-filter-help" onChange={e => { setResult(e.target.value); setPage(0); }}>
+      <label>Result<select value={result} aria-describedby="overview-filter-help" onChange={e => updateView({ result: e.target.value, page: 0 })}>
         <option value="">All results</option><option value="errors">Discrepancies only</option>
         {Object.entries(names).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select></label>
-      <label>Membership<select value={split} aria-describedby="overview-membership-help" onChange={e => { setSplit(e.target.value); setPage(0); }}>
+      <label>Membership<select value={split} aria-describedby="overview-membership-help" onChange={e => updateView({ split: e.target.value, page: 0 })}>
         <option value="">All splits</option><option value="train">Used for training</option><option value="val">Validation</option>
       </select></label>
-      <label>Source image<select value={source} onChange={e => { setSource(e.target.value); setPage(0); }}>
+      <label>Source image<select value={source} onChange={e => updateView({ source: e.target.value, page: 0 })}>
         <option value="">All images</option>{sources.map(id => <option key={id}>{id}</option>)}
       </select></label>
-      <label>Review status<select value={quality} aria-describedby="overview-review-help" onChange={e => { setQuality(e.target.value); setPage(0); }}>
+      <label>Review status<select value={quality} aria-describedby="overview-review-help" onChange={e => updateView({ quality: e.target.value, page: 0 })}>
         <option value="">All crops</option><option value="unreviewed">Unreviewed predictions</option>
         <option value="reviewed">Reviewed predictions</option><option value="not_mite">Reviewed: not a mite</option>
         <option value="confirmed">Confirmed mites from predictions</option><option value="removed">Removed labels</option>
         <option value="present">Current mite labels</option><option value="legacy">Legacy flags — review labels</option>
       </select></label>
-      <label>Crop size: {size}px<input type="range" min="64" max="160" step="8" value={size} onChange={e => setSize(Number(e.target.value))} /></label>
+      <label>Crop size: {size}px<input type="range" min="64" max="160" step="8" value={size} onChange={e => updateView({ size: Number(e.target.value) })} /></label>
     </div>
     <div className="overview-filter-help">
       <p id="overview-filter-help">{resultHelp[result]?.meaning || (result === "errors"
@@ -291,8 +296,8 @@ export default function MiteOverview({ openSource, documentUpdated, savingChange
         <small>For the current result, membership, and source filters.</small>
       </p>}
       <div className="overview-pagination"><span role="status">{filtered.length} of {data.items.length} crops · Page {visiblePage + 1} / {pages}</span>
-        <button disabled={visiblePage === 0} onClick={() => setPage(visiblePage - 1)}>Previous</button>
-        <button disabled={visiblePage === pages - 1} onClick={() => setPage(visiblePage + 1)}>Next</button>
+        <button disabled={visiblePage === 0} onClick={() => updateView({ page: visiblePage - 1 })}>Previous</button>
+        <button disabled={visiblePage === pages - 1} onClick={() => updateView({ page: visiblePage + 1 })}>Next</button>
       </div>
       {!filtered.length && <p>No crops match these filters.</p>}
       <div className="mite-grid" style={{ "--crop-size": `${size}px` } as CSSProperties}>
@@ -324,7 +329,7 @@ export default function MiteOverview({ openSource, documentUpdated, savingChange
         <p className="detail-category-action">{resultHelp[outcomeStatus(selected, split)].action}</p>
         {selected.kind === "annotation" && <p className="detail-category-help">
           This crop had a mite label marked reviewed in the selected run’s saved annotations. That status can include a mistaken label.
-          Open source image shows the current labels, makes their markers visible, and zooms to the matching label if it still exists.
+          Open source image zooms to this crop’s location and shows current labels. If no label exists at the center, a temporary orange guide marks the location.
         </p>}
         <img className="detail-crop" src={imageUrl(selected)} width="384" height="384" alt={`Enlarged crop centered at ${selected.x.toFixed(1)}, ${selected.y.toFixed(1)}`} />
         <p>Source: {selected.source_id}<br />Center: {selected.x.toFixed(1)}, {selected.y.toFixed(1)} · {selected.splits.join(" + ") || "Unused in this run"}</p>
