@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { api, json } from "./api";
-import type { Doc } from "./types";
+import type { Doc, ImageRegion, TileContext, TileLayout } from "./types";
+import TileCrop from "./TileCrop";
+import TileLegend from "./TileLegend";
 
 type Outcome = { split: string; status: string; tile_id?: string; confidence?: number };
 type Item = { id: string; source_id: string; kind: string; x: number; y: number; crop: string;
-  status: string; splits: string[]; outcomes: Outcome[]; review_key?: string };
+  status: string; splits: string[]; outcomes: Outcome[]; review_key?: string; crop_bounds?: ImageRegion };
 type Review = { reason: "not_mite" | "poor_quality" };
 type AnnotationState = { status: "present" | "removed" | "changed" | "unavailable";
   annotation_id: string | null; can_restore: boolean };
 type PredictionReview = { decision: "not_mite" };
 type Overview = { run_name: string; interpretation: string; note: string; items: Item[]; reviews: Record<string, Review>;
   confirmed_predictions: Record<string, string>; prediction_reviews: Record<string, PredictionReview>;
-  annotation_states: Record<string, AnnotationState> };
+  annotation_states: Record<string, AnnotationState>; tile_layouts?: Record<string, TileLayout> };
 type Run = { id: string; name: string; ready: boolean };
 export type OverviewView = {
   runId: string; result: string; split: string; source: string; quality: string; size: number; page: number;
@@ -67,11 +69,13 @@ export function predictionReviewStatus(item: { id: string; kind: string },
   return reviews[item.id]?.decision === "not_mite" ? "not_mite" : "unreviewed";
 }
 
-export default function MiteOverview({ view, setView, openSource, documentUpdated, savingChanged, refreshKey }: {
+export default function MiteOverview({ view, setView, openSource, documentUpdated, savingChanged, refreshKey,
+  tilesVisible, toggleTiles }: {
   view: OverviewView; setView: Dispatch<SetStateAction<OverviewView>>;
-  openSource: (item: { source_id: string; x: number; y: number }) => void;
+  openSource: (item: { source_id: string; x: number; y: number; tileContext?: TileContext }) => void;
   documentUpdated: (doc: Doc, annotationId: string | null) => void;
   savingChanged: (saving: boolean) => void; refreshKey?: string;
+  tilesVisible: boolean; toggleTiles: () => void;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const { runId, result, split, source, quality, size, page } = view;
@@ -201,9 +205,20 @@ export default function MiteOverview({ view, setView, openSource, documentUpdate
   const selectedAnnotation = selected ? data?.annotation_states[selected.id] : undefined;
   const selectedPredictionStatus = selected ? predictionReviewStatus(selected, data?.confirmed_predictions, data?.prediction_reviews) : null;
   const selectedConfirmed = selectedPredictionStatus === "mite";
+  const selectedLayout = selected ? data?.tile_layouts?.[selected.source_id] : undefined;
+  const coveringTiles = selectedLayout?.tiles.filter(tile => selected && tile.x <= selected.x && tile.y <= selected.y
+    && selected.x < tile.x + tile.width && selected.y < tile.y + tile.height) || [];
+  const hasTiles = Object.values(data?.tile_layouts || {}).some(layout => layout.tiles.length > 0);
+  const tileIds = (item: Item) => item.outcomes.flatMap(outcome => outcome.tile_id ? [outcome.tile_id] : []);
   return <section className="mite-overview" aria-label="Mite overview">
     <div className="overview-heading"><div><h2>Mite overview</h2><p>Inspect individual mites across a training run. Click any crop to review and update its current label.</p></div>
-      <button disabled={loading || saving} onClick={() => setRevision(value => value + 1)}>Refresh runs</button></div>
+      <div className="overview-heading-actions">
+        <button type="button" aria-pressed={tilesVisible} aria-keyshortcuts="T" title="Show or hide tile borders (T)"
+          disabled={!tilesVisible && !hasTiles} onClick={toggleTiles}>
+          {tilesVisible ? "Hide tile borders" : "Show tile borders"} (T)
+        </button>
+        <button disabled={loading || saving} onClick={() => setRevision(value => value + 1)}>Refresh runs</button>
+      </div></div>
     <div className="overview-controls">
       <label className="run-select">Training run<select value={runId} disabled={loading || saving} onChange={e => updateView({ runId: e.target.value, source: "", page: 0 })}>
         {runs.map(run => <option key={run.id} value={run.id}>{run.name}{run.ready ? "" : " (overview not built)"}</option>)}
@@ -289,6 +304,11 @@ export default function MiteOverview({ view, setView, openSource, documentUpdate
     {currentRun && !currentRun.ready && <div className="overview-notice"><p>This older run has no crop overview yet. Build it from its saved predictions. Training-only crops may be marked “not evaluated”.</p><button disabled={loading} onClick={() => void build()}>Build saved overview</button></div>}
     {data && <>
       <p className="overview-note">{data.interpretation} {data.note}</p>
+      {tilesVisible && hasTiles && <>
+        <TileLegend completeGrid={Object.values(data.tile_layouts || {}).every(layout => layout.complete_grid)} />
+        <p className="tile-overlay-help">Faint dotted borders show omitted tiles wherever saved grid settings are available. Tile usage includes all splits, regardless of the Membership filter. Open a source image to see the full overlaps.</p>
+      </>}
+      {!hasTiles && <p className="overview-note">No saved tile geometry is available for this run.</p>}
       <p className="overview-note">Not a mite removes the selected annotation directly from the current dataset after confirmation. Nearby labels and tiles stay available for training. Saved run results stay as recorded.</p>
       <div className="overview-legend">{Object.entries(names).map(([value, label]) => <span key={value} className={`legend-${value}`} title={resultHelp[value].meaning}>{label}</span>)}<span title="A reviewed mite label currently exists near this prediction; the historical result color is unchanged.">✓ Confirmed mite</span><span title="This prediction was checked and marked Not a mite.">− Reviewed: not a mite</span><span title="No current label remains at this saved annotation center.">× Removed label</span></div>
       {predictionProgress.total > 0 && <p className="prediction-review-progress" role="status">
@@ -311,7 +331,8 @@ export default function MiteOverview({ view, setView, openSource, documentUpdate
           const rejected = reviewStatus === "not_mite";
           return <button key={item.id} className={`mite-card result-${status}`} onClick={() => { setSelected(item); setConfirmRemoval(false); setNotice(""); setError(""); }}
             aria-label={`${names[status]}, ${item.splits.join(" and ") || "unused"}, ${item.source_id}, x ${item.x.toFixed(1)}, y ${item.y.toFixed(1)}${removed ? ", label removed" : ""}${confirmed ? ", confirmed mite" : rejected ? ", reviewed: not a mite" : reviewStatus === "unreviewed" ? ", unreviewed" : ""}`}>
-            <img src={imageUrl(item)} loading="lazy" width="96" height="96" alt="" />
+            <TileCrop src={imageUrl(item)} alt="" region={item.crop_bounds}
+              tiles={data.tile_layouts?.[item.source_id]?.tiles || []} highlightedTileIds={tileIds(item)} visible={tilesVisible} />
             {removed && <strong className="mite-flag" aria-hidden="true">×</strong>}
             {confirmed && <strong className="mite-confirmed" aria-hidden="true">✓</strong>}
             {rejected && <strong className="prediction-not-mite" aria-hidden="true">−</strong>}
@@ -331,14 +352,31 @@ export default function MiteOverview({ view, setView, openSource, documentUpdate
           This crop had a mite label marked reviewed in the selected run’s saved annotations. That status can include a mistaken label.
           Open source image zooms to this crop’s location and shows current labels. If no label exists at the center, a temporary orange guide marks the location.
         </p>}
-        <img className="detail-crop" src={imageUrl(selected)} width="384" height="384" alt={`Enlarged crop centered at ${selected.x.toFixed(1)}, ${selected.y.toFixed(1)}`} />
+        <button type="button" aria-pressed={tilesVisible} aria-keyshortcuts="T" title="Show or hide tile borders (T)" disabled={!tilesVisible && !selectedLayout?.tiles.length} onClick={toggleTiles}>
+          {tilesVisible ? "Hide tile borders" : "Show tile borders"} (T)
+        </button>
+        <TileCrop className="detail-crop" src={imageUrl(selected)} region={selected.crop_bounds}
+          tiles={selectedLayout?.tiles || []} highlightedTileIds={tileIds(selected)} visible={tilesVisible}
+          alt={`Enlarged crop centered at ${selected.x.toFixed(1)}, ${selected.y.toFixed(1)}`} />
+        {tilesVisible && <>
+          <p className="tile-overlay-help">Tiles covering this crop's center (all splits):</p>
+          <TileLegend tiles={coveringTiles} completeGrid={selectedLayout?.complete_grid} />
+          <p className="tile-overlay-help">{selectedLayout?.tiles.length
+            ? "Omitted tiles were not used in this run. Borders outside this crop are visible in the source image."
+            : "No saved tiles for this source."}</p>
+        </>}
         <p>Source: {selected.source_id}<br />Center: {selected.x.toFixed(1)}, {selected.y.toFixed(1)} · {selected.splits.join(" + ") || "Unused in this run"}</p>
         <ul>{selected.outcomes.map((outcome, index) => <li key={`${outcome.tile_id}-${index}`}>
           {outcome.split === "train" ? "Training reconstruction" : "Validation"}: {names[outcome.status]}
           {outcome.confidence != null ? ` (${(outcome.confidence * 100).toFixed(1)}%)` : ""}<small> {outcome.tile_id}</small>
         </li>)}</ul>
         {!selected.outcomes.length && <p>No saved predictions evaluated this crop.</p>}
-        <button disabled={saving} onClick={() => { setSelected(null); openSource(selected); }}>Open source image</button>
+        <button disabled={saving} onClick={() => {
+          setSelected(null);
+          openSource({ ...selected, tileContext: selectedLayout ? {
+            sourceId: selected.source_id, runName: data!.run_name, layout: selectedLayout, highlightedTileIds: tileIds(selected),
+          } : undefined });
+        }}>Open source image</button>
         {selected.kind === "prediction" && <fieldset disabled={saving}>
           <legend>Review a possible missed mite</legend>
           <p>An unmatched prediction can be a real mite missed during labeling. Confirm it to save a reviewed mite label at the crop center for future training.</p>

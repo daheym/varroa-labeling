@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Stage, Layer, Group, Image as KImage, Circle, Line, Text, Shape } from "react-konva";
+import { Stage, Layer, Group, Image as KImage, Circle, Line, Text, Shape, Rect } from "react-konva";
 import {
   screenToImage,
   zoomAt,
@@ -8,7 +8,10 @@ import {
   viewAroundPoint,
   type View,
 } from "./coordinates";
-import type { Doc, Point, SourceFocus } from "./types";
+import type { Doc, Point, SourceFocus, TileContext } from "./types";
+import { layoutMatchesImage, orderedTiles, tileStyle, contributingTileColor } from "./tiles";
+import TileLegend from "./TileLegend";
+import { api } from "./api";
 type Props = {
   doc: Doc;
   selected: string | null;
@@ -22,6 +25,9 @@ type Props = {
   corrected: boolean;
   annotationsVisible: boolean;
   toggleAnnotations: () => void;
+  tilesVisible: boolean;
+  toggleTiles: () => void;
+  tileContext: TileContext | null;
   focusTarget: SourceFocus | null;
   clearFocus: () => void;
 };
@@ -33,6 +39,7 @@ export default function Canvas(p: Props) {
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [image, setImage] = useState<HTMLImageElement>();
   const [error, setError] = useState("");
+  const [savedTiles, setSavedTiles] = useState<{ imageId: string; context: TileContext | null; error?: string } | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
   const focusTarget = editable && p.focusTarget?.imageId === p.doc.image_id
     && inside(p.focusTarget, width, height) ? p.focusTarget : null;
@@ -76,7 +83,21 @@ export default function Canvas(p: Props) {
   useEffect(() => {
     if (focusTarget) setView(viewAroundPoint(focusTarget, size));
   }, [focusTarget, size.width, size.height]);
+  useEffect(() => {
+    if (p.tileContext?.sourceId === p.doc.image_id) return;
+    const controller = new AbortController();
+    const imageId = p.doc.image_id;
+    setSavedTiles(null);
+    api<TileContext | null>(`/api/images/${imageId}/tiles`, { signal: controller.signal })
+      .then(context => { if (!controller.signal.aborted) setSavedTiles({ imageId, context }); })
+      .catch(() => { if (!controller.signal.aborted) setSavedTiles({ imageId, context: null, error: "Could not load saved tiles. Reopen this image to retry." }); });
+    return () => controller.abort();
+  }, [p.doc.image_id, p.tileContext?.sourceId, p.doc.perspective?.file]);
   const selectedLabel = p.doc.annotations.find(a => a.id === p.selected);
+  const currentSavedTiles = savedTiles?.imageId === p.doc.image_id ? savedTiles : null;
+  const tileContext = p.tileContext?.sourceId === p.doc.image_id ? p.tileContext : currentSavedTiles?.context;
+  const tilesAligned = tileContext && layoutMatchesImage(tileContext.layout, p.doc, p.corrected);
+  const hasTiles = Boolean(tileContext?.layout.tiles.length);
   return (
     <div className="canvas-wrap" ref={container}>
       <div className="canvas-toolbar">
@@ -92,6 +113,18 @@ export default function Canvas(p: Props) {
         <button type="button" onClick={fit}>
           {p.corrected ? "Corrected" : "Original"} / Fit image · {Math.round(view.scale * 100)}%
         </button>
+        <button type="button" aria-pressed={p.tilesVisible} disabled={!p.tilesVisible && (!hasTiles || !tilesAligned)}
+          aria-keyshortcuts="T" title="Show or hide the complete tile grid and its training/validation usage (T)" onClick={p.toggleTiles}>
+          {p.tilesVisible ? "Hide tile borders" : "Show tile borders"} (T)
+        </button>
+        {!tileContext && <span>{!currentSavedTiles ? "Loading saved tiles…" : currentSavedTiles.error
+          || "No saved tiles for this image. Complete a training run to view tile borders."}</span>}
+        {tileContext && !hasTiles && <span>No saved tiles for this source.</span>}
+        {hasTiles && !tilesAligned && <span role="status">Tile borders unavailable: switch to the run's image view. If perspective has changed, review a newer run.</span>}
+        {p.tilesVisible && tilesAligned && hasTiles && <div className="canvas-tile-info">
+          <span>{tileContext!.runName} · Tile usage across the source image (all splits)</span>
+          <TileLegend tiles={tileContext!.layout.tiles} completeGrid={tileContext!.layout.complete_grid} />
+        </div>}
         {!p.annotationsVisible && (
           <span role="status">Annotations hidden — show to add or move labels</span>
         )}
@@ -161,6 +194,28 @@ export default function Canvas(p: Props) {
             height={height}
           />
         </Layer>
+        {p.tilesVisible && tilesAligned && hasTiles && <Layer listening={false}>
+          <Group name="tile-borders" listening={false} clipX={0} clipY={0} clipWidth={width} clipHeight={height}>
+            {orderedTiles(tileContext!.layout.tiles, tileContext!.highlightedTileIds).map(tile => {
+              const highlighted = tileContext!.highlightedTileIds.includes(tile.id);
+              const style = tileStyle(tile);
+              const omitted = tile.split === "omitted";
+              return <Group key={tile.id} listening={false}>
+                <Rect x={tile.x} y={tile.y} width={tile.width} height={tile.height}
+                  fill={style.fill} stroke="#14212d" strokeWidth={(highlighted ? 7 : omitted ? 2 : 4) / view.scale}
+                  dash={omitted ? style.dash.map(value => value / view.scale) : undefined} opacity={omitted ? 0.35 : 1} />
+                {highlighted && <Rect x={tile.x} y={tile.y} width={tile.width} height={tile.height}
+                  stroke={contributingTileColor} strokeWidth={5 / view.scale} dash={[6 / view.scale, 4 / view.scale]} />}
+                <Rect x={tile.x} y={tile.y} width={tile.width} height={tile.height}
+                  stroke={style.color} strokeWidth={style.width / view.scale} opacity={omitted ? 0.65 : 1}
+                  dash={style.dash.length ? style.dash.map(value => value / view.scale) : undefined} />
+                {tile.width * view.scale >= 120 && <Text x={tile.x + 5 / view.scale} y={tile.y + 5 / view.scale}
+                  text={`${style.label} · ${tile.x}, ${tile.y}`} fontSize={11 / view.scale}
+                  fill={style.color} opacity={omitted ? 0.65 : 1} stroke="#14212d" strokeWidth={2 / view.scale} fillAfterStrokeEnabled />}
+              </Group>;
+            })}
+          </Group>
+        </Layer>}
         <Layer>
           {editable && p.annotationsVisible &&
             p.doc.annotations.map((a) => (

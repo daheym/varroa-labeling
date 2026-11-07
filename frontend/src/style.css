@@ -48,6 +48,20 @@
 .mite-detail::backdrop { background: #000b; }
 .mite-detail h2 { margin-top: 0; border: 0; padding-top: 0; font-size: 20px; }
 .detail-close { float: right; }.detail-crop { display: block; width: min(384px, 100%); height: auto; margin: 16px auto; }
+.tile-crop { position: relative; }
+.tile-crop img { display: block; width: 100%; height: auto; aspect-ratio: 1; }
+.tile-crop-overlay { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+.tile-overlay-help { color: #bfd6e4; font-size: 12px; line-height: 1.5; }
+.tile-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 6px 0; }
+.tile-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.tile-key { display: inline-block; width: 24px; height: 0; border-top: 2px solid; }
+.tile-key-train { border-color: #65deff; }
+.tile-key-val { border-color: #d8a3ff; border-top-style: dashed; }
+.tile-key-omitted { border-color: #a9b4c2; border-top-style: dotted; opacity: 0.65; }
+.tile-key-selected { border-color: #ffd166; border-top-width: 4px; border-top-style: dashed; }
+.canvas-tile-info { flex-basis: 100%; text-align: right; font-size: 12px; text-shadow: 0 1px 3px #000; }
+.canvas-tile-info .tile-legend { justify-content: flex-end; }
+.overview-heading-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .mite-detail p, .mite-detail li { overflow-wrap: anywhere; line-height: 1.5; }.mite-detail li small { display: block; color: #acbdcd; }
 .mite-detail fieldset { margin-top: 20px; border-top: 1px solid #536273; padding-top: 10px; }
 .mite-overview button:focus-visible, .workspace-tabs button:focus-visible { outline: 3px solid #8fd9ff; outline-offset: 2px; }
@@ -271,6 +285,7 @@ p {
   color: #e5eaf0;
   font-size: 12px;
 }
+.canvas-toolbar > span { flex-basis: 100%; text-align: right; font-size: 12px; text-shadow: 0 1px 3px #000; }
 .empty,
 .canvas-message {
   position: absolute;

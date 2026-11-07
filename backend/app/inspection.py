@@ -217,6 +217,59 @@ def payload(training_root, run_id):
     return json.loads(path.read_text('utf-8'))
 
 
+def tile_layouts(training_root, run_id):
+    """Combine retained windows with the full grid from the run's saved settings."""
+    manifest = json.loads((run_path(training_root, run_id) / 'dataset_manifest.json').read_text('utf-8'))
+    return _tile_layouts(manifest)
+
+
+def _tile_layouts(manifest):
+    config = manifest.get('config', {})
+    size, overlap = config.get('tile_size'), config.get('overlap')
+    complete = (isinstance(size, int) and isinstance(overlap, int)
+                and size > 0 and 0 <= overlap < size)
+    layouts = {source['id']: dict(
+        width=source['width'], height=source['height'],
+        coordinate_space=source['coordinate_space'],
+        homography=(source.get('perspective') or {}).get('homography'),
+        complete_grid=complete, tiles=[])
+        for source in manifest.get('sources', [])}
+    for tile in manifest.get('tiles', []):
+        if tile['source_id'] in layouts:
+            layouts[tile['source_id']]['tiles'].append({
+                key: tile[key] for key in ('id', 'x', 'y', 'width', 'height', 'split')})
+    if complete:
+        # Match preparation's edge-anchored grid, including its final short stride.
+        # Only retained tiles have saved split assignments. Do not guess a split
+        # for omitted windows or use today's tiling configuration.
+        def starts(length):
+            last = max(0, length - size)
+            return sorted({*range(0, last + 1, size - overlap), last})
+
+        for source_id, layout in layouts.items():
+            retained = {(tile['x'], tile['y']) for tile in layout['tiles']}
+            for row, y in enumerate(starts(layout['height'])):
+                for column, x in enumerate(starts(layout['width'])):
+                    if (x, y) not in retained:
+                        layout['tiles'].append(dict(
+                            id=f'{source_id}__omitted_{row}_{column}', x=x, y=y,
+                            width=min(size, layout['width'] - x), height=min(size, layout['height'] - y),
+                            split='omitted'))
+    return layouts
+
+
+def latest_tile_context(training_root, doc):
+    for run in runs(training_root):
+        manifest = json.loads((run['path'] / 'dataset_manifest.json').read_text('utf-8'))
+        source = next((source for source in manifest.get('sources', []) if source['id'] == doc.image_id), None)
+        if source is None or snapshot_geometry_hash(source) != document_geometry_hash(doc):
+            continue
+        layout = _tile_layouts(manifest)[doc.image_id]
+        if layout['tiles']:
+            return dict(sourceId=doc.image_id, runName=run['name'], layout=layout, highlightedTileIds=[])
+    return None
+
+
 def build(training_root, python, run_id):
     run = run_path(training_root, run_id)
     try:

@@ -1,4 +1,13 @@
 export type Point = { x: number; y: number };
+export type ImageRegion = Point & { width: number; height: number };
+export type Tile = ImageRegion & { id: string; split: string };
+export type TileLayout = {
+  width: number; height: number; coordinate_space: "original" | "canonical";
+  homography: number[][] | null; tiles: Tile[]; complete_grid?: boolean;
+};
+export type TileContext = {
+  sourceId: string; runName: string; layout: TileLayout; highlightedTileIds: string[];
+};
 export type SourceFocus = Point & {
   imageId: string;
   annotationId: string | null;

@@ -3,11 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { Doc, SourceFocus } from "./types";
+import type { Doc, SourceFocus, TileContext } from "./types";
 
-vi.mock("./Canvas", () => ({ default: ({ doc, focusTarget, selected }: {
-  doc: Doc; focusTarget: SourceFocus | null; selected: string | null;
-}) => <div data-testid="canvas" data-focus={JSON.stringify(focusTarget)} data-selected={selected}>{doc.image_id}</div> }));
+vi.mock("./Canvas", () => ({ default: ({ doc, focusTarget, selected, tileContext, tilesVisible }: {
+  doc: Doc; focusTarget: SourceFocus | null; selected: string | null; tileContext: TileContext | null; tilesVisible: boolean;
+}) => <div data-testid="canvas" data-focus={JSON.stringify(focusTarget)} data-selected={selected}
+  data-tiles={JSON.stringify(tileContext)} data-tiles-visible={tilesVisible}>{doc.image_id}</div> }));
 
 const source: Doc = {
   schema_version: "1.0", image_id: "source-b", filename: "board.png",
@@ -18,7 +19,8 @@ const source: Doc = {
 const items = Array.from({ length: 502 }, (_, index) => ({
   id: `prediction-${index}`, source_id: source.image_id, kind: "prediction",
   x: index, y: 100, crop: `${index}.png`, status: "extra", splits: ["val"],
-  outcomes: [{ split: "val", status: "extra" }],
+  outcomes: [{ split: "val", status: "extra", tile_id: "val-tile" }],
+  crop_bounds: { x: index - 48, y: 52, width: 96, height: 96 },
 }));
 
 let container: HTMLDivElement;
@@ -77,7 +79,12 @@ beforeEach(async () => {
       overviewLoads.push(url);
       data = { run_name: "Test", interpretation: "", note: "", reviews: {},
         confirmed_predictions: confirmed, prediction_reviews: {}, annotation_states: {},
-        items: [...items, { ...items[0], id: "other", source_id: "source-a" }] };
+        items: [...items, { ...items[0], id: "other", source_id: "source-a" }],
+        tile_layouts: { [source.image_id]: { width: 1000, height: 1000, coordinate_space: "original", homography: null, complete_grid: true, tiles: [
+          { id: "val-tile", x: 0, y: 0, width: 640, height: 640, split: "val" },
+          { id: "train-tile", x: 512, y: 0, width: 488, height: 640, split: "train" },
+          { id: "omitted-tile", x: 0, y: 64, width: 640, height: 640, split: "omitted" },
+        ] } } };
     } else throw new Error(`Unexpected request: ${url}`);
     return new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
   }));
@@ -95,6 +102,68 @@ afterEach(async () => {
 });
 
 describe("Mite overview navigation", () => {
+  it("toggles crop borders and carries the selected run's contributing tiles into the source view", async () => {
+    expect(container.querySelector(".tile-crop-overlay")).toBeNull();
+    expect(container.querySelector(".overview-heading-actions button")?.textContent).toBe("Show tile borders (T)");
+    await click("Show tile borders (T)");
+    expect(button("Hide tile borders (T)").getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector(".tile-crop-overlay")?.getAttribute("viewBox")).toBe("-48 52 96 96");
+    expect(container.querySelector('.tile-crop-overlay [data-usage="val"][data-contributing="true"] [stroke="#d8a3ff"]')).not.toBeNull();
+    expect(container.querySelector('.tile-crop-overlay [data-usage="omitted"] [stroke-dasharray]')).not.toBeNull();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".mite-card")!.click(); });
+    expect(container.querySelector("dialog .tile-crop-overlay")).not.toBeNull();
+    expect(container.querySelector("dialog")?.textContent).toContain("Training (0)");
+    expect(container.querySelector("dialog")?.textContent).toContain("Validation (1)");
+    expect(container.querySelector("dialog")?.textContent).toContain("Omitted from run (1)");
+    await click("Open source image");
+    const canvas = container.querySelector('[data-testid="canvas"]')!;
+    expect(canvas.getAttribute("data-tiles-visible")).toBe("true");
+    expect(JSON.parse(canvas.getAttribute("data-tiles")!)).toMatchObject({
+      sourceId: source.image_id, runName: "Test", highlightedTileIds: ["val-tile"],
+    });
+    await click("Mite overview");
+    await click("Hide tile borders (T)");
+    expect(container.querySelector(".tile-crop-overlay")).toBeNull();
+  });
+
+  it("uses T in the overview, crop dialog and source view while ignoring typing, modifiers and repeats", async () => {
+    async function pressT(target: EventTarget = document.body, options: KeyboardEventInit = {}) {
+      await act(async () => { target.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "t", code: "KeyT", bubbles: true, cancelable: true, ...options,
+      })); });
+    }
+    await pressT();
+    expect(button("Hide tile borders (T)").getAttribute("aria-keyshortcuts")).toBe("T");
+    for (const options of [{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { isComposing: true }]) {
+      await pressT(document.body, options);
+      expect(button("Hide tile borders (T)").getAttribute("aria-pressed")).toBe("true");
+    }
+    await pressT(control("Crop size"));
+    await pressT(control("Training run"));
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    editor.setAttribute("contenteditable", "true");
+    editor.innerHTML = "<span>Editable text</span>";
+    const textarea = document.createElement("textarea");
+    container.append(editor, textarea);
+    await pressT(editor.firstElementChild!);
+    await pressT(textarea);
+    expect(button("Hide tile borders (T)").getAttribute("aria-pressed")).toBe("true");
+    editor.remove(); textarea.remove();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".mite-card")!.click(); });
+    await pressT(container.querySelector("dialog")!);
+    expect(container.querySelector("dialog .tile-crop-overlay")).toBeNull();
+    expect(container.querySelector(".tile-crop-overlay")).toBeNull();
+    const detailToggle = container.querySelector<HTMLButtonElement>('dialog button[aria-keyshortcuts="T"]')!;
+    await act(async () => { detailToggle.click(); });
+    expect(container.querySelector("dialog .tile-crop-overlay")).not.toBeNull();
+    expect(container.querySelector('.overview-heading-actions button[aria-pressed="true"]')).not.toBeNull();
+    await click("Open source image");
+    await pressT();
+    expect(container.querySelector('[data-testid="canvas"]')?.getAttribute("data-tiles-visible")).toBe("false");
+    await click("Mite overview");
+    expect(button("Show tile borders (T)").getAttribute("aria-pressed")).toBe("false");
+  });
   it("passes an unmatched prediction location to the canvas without creating a label", async () => {
     await act(async () => { container.querySelector<HTMLButtonElement>(".mite-card")!.click(); });
     await click("Open source image");

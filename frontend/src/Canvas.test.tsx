@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Canvas from "./Canvas";
 import { imageToScreen } from "./coordinates";
-import type { Doc, SourceFocus } from "./types";
+import type { Doc, SourceFocus, TileContext } from "./types";
 
 vi.mock("react-konva", () => {
   const Container = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
@@ -15,6 +15,9 @@ vi.mock("react-konva", () => {
     Group: ({ name, listening, children }: { name: string; listening: boolean; children?: ReactNode }) =>
       <div data-testid={name} data-listening={String(listening)}>{children}</div>,
     Image: () => null, Circle: () => null, Line: () => null, Text: () => null, Shape: () => null,
+    Rect: ({ x, y, width, height, dash, stroke }: { x: number; y: number; width: number; height: number; dash?: number[]; stroke?: string }) =>
+      <div data-testid="tile-rect" data-window={JSON.stringify({ x, y, width, height })}
+        data-stroke={stroke} data-dash={JSON.stringify(dash)} data-highlighted={stroke === "#ffd166"} />,
   };
 });
 
@@ -50,12 +53,74 @@ function view() {
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("null", { headers: { "Content-Type": "application/json" } })));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   props = { doc, selected: null, select: vi.fn(), add: vi.fn(), move: vi.fn(), corners: [],
     setCorners: vi.fn(), perspective: false, space: false, corrected: false,
-    annotationsVisible: true, toggleAnnotations: vi.fn(), focusTarget: target, clearFocus: vi.fn() };
+    annotationsVisible: true, toggleAnnotations: vi.fn(), focusTarget: target, clearFocus: vi.fn(),
+    tilesVisible: false, toggleTiles: vi.fn(), tileContext: null };
+});
+
+describe("saved tile overlay", () => {
+  const context: TileContext = { sourceId: doc.image_id, runName: "Reviewed run", highlightedTileIds: ["second"],
+    layout: { width: 6000, height: 4000, coordinate_space: "original", homography: null, complete_grid: true, tiles: [
+      { id: "first", x: 0, y: 0, width: 640, height: 640, split: "train" },
+      { id: "second", x: 512, y: 0, width: 640, height: 640, split: "val" },
+      { id: "omitted", x: 1024, y: 0, width: 640, height: 640, split: "omitted" },
+    ] } };
+
+  it("shows exact overlapping windows independently of annotations without changing the viewport", async () => {
+    props = { ...props, tileContext: context, toggleTiles: vi.fn(() => { props = { ...props, tilesVisible: !props.tilesVisible }; }) };
+    await render();
+    const originalView = view();
+    expect(container.querySelector('[data-testid="tile-borders"]')).toBeNull();
+    await click("Show tile borders (T)");
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')?.getAttribute("data-listening")).toBe("false");
+    expect(container.querySelectorAll('[data-testid="tile-rect"]')).toHaveLength(7);
+    expect(container.querySelectorAll('[data-highlighted="true"]')).toHaveLength(1);
+    expect(container.querySelector('[data-stroke="#65deff"]')?.getAttribute("data-dash")).toBeNull();
+    expect(container.querySelector('[data-stroke="#d8a3ff"]')?.getAttribute("data-dash")).toBeDefined();
+    expect(container.querySelector('[data-stroke="#a9b4c2"]')?.getAttribute("data-dash")).toBeDefined();
+    expect(container.textContent).toContain("Training (1)");
+    expect(container.textContent).toContain("Validation (1)");
+    expect(container.textContent).toContain("Omitted from run (1)");
+    expect(view()).toEqual(originalView);
+    props = { ...props, annotationsVisible: false };
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')).not.toBeNull();
+    await click("Hide tile borders (T)");
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')).toBeNull();
+    expect(props.add).not.toHaveBeenCalled();
+    expect(props.move).not.toHaveBeenCalled();
+  });
+
+  it("loads the latest saved tiles for an image opened directly", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(context))));
+    props = { ...props, tilesVisible: true };
+    await render();
+    expect(fetch).toHaveBeenCalledWith(`/api/images/${doc.image_id}/tiles`, expect.anything());
+    expect(container.querySelector('[data-testid="tile-borders"]')).not.toBeNull();
+  });
+
+  it("withholds geometry from a different coordinate space or a changed perspective", async () => {
+    const homography = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    props = { ...props, tileContext: { ...context, layout: { ...context.layout, coordinate_space: "canonical", homography } },
+      tilesVisible: true, doc: { ...doc, coordinate_space: "canonical",
+        perspective: { width: 6000, height: 4000, file: "corrected.png", homography } } };
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')).toBeNull();
+    props = { ...props, corrected: true };
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')).not.toBeNull();
+    props = { ...props, doc: { ...props.doc, perspective: { ...props.doc.perspective!, homography: [[2, 0, 0], [0, 2, 0], [0, 0, 1]] } } };
+    await render();
+    expect(container.querySelector('[data-testid="tile-borders"]')).toBeNull();
+    expect(container.textContent).toContain("Tile borders unavailable");
+  });
 });
 
 afterEach(async () => {

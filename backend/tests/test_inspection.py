@@ -46,6 +46,76 @@ def add_prediction(tmp_path, doc, item_id='extra-1', x=90, y=50):
     return path
 
 
+def test_tile_overlay_uses_saved_windows_and_crop_rounding(client, tmp_path, monkeypatch):
+    run_id, doc = setup_run(client, tmp_path, monkeypatch, corrected=True)
+    path = tmp_path / 'training/runs/example/dataset_manifest.json'
+    manifest = json.loads(path.read_text())
+    tiles = [dict(id='first', source_id=doc['image_id'], x=0, y=0, width=640, height=640, split='train'),
+             dict(id='overlapping', source_id=doc['image_id'], x=512, y=0, width=640, height=640, split='val')]
+    manifest['tiles'] = tiles
+    path.write_text(json.dumps(manifest))
+    add_prediction(tmp_path, doc, x=48.5, y=49.5)
+    response = client.get(f'/api/inspection/runs/{run_id}')
+    assert response.status_code == 200
+    data = response.json()
+    layout = data['tile_layouts'][doc['image_id']]
+    assert layout['tiles'] == [{key: value for key, value in tile.items() if key != 'source_id'} for tile in tiles]
+    assert layout['coordinate_space'] == 'canonical'
+    assert layout['complete_grid'] is False
+    assert layout['homography'] == doc['perspective']['homography']
+    assert data['items'][-1]['crop_bounds'] == dict(x=0, y=2, width=96, height=96)
+    # Geometry is read without rewriting the saved training artifacts.
+    assert json.loads(path.read_text()) == manifest
+    context = client.get(f"/api/images/{doc['image_id']}/tiles").json()
+    assert context['layout'] == layout
+    assert context['highlightedTileIds'] == []
+    doc['perspective']['homography'][0][0] += 1
+    main.write(main.Document.model_validate(doc))
+    assert client.get(f"/api/images/{doc['image_id']}/tiles").json() is None
+
+
+def test_tile_overlay_handles_runs_without_saved_tiles(client, tmp_path, monkeypatch):
+    run_id, doc = setup_run(client, tmp_path, monkeypatch)
+    assert client.get(f'/api/inspection/runs/{run_id}').json()['tile_layouts'][doc['image_id']]['tiles'] == []
+    assert client.get(f"/api/images/{doc['image_id']}/tiles").json() is None
+    assert client.get('/api/images/missing/tiles').status_code == 404
+
+
+def test_complete_grid_preserves_split_membership_and_covers_edges():
+    source = dict(id='board', width=1500, height=1000, coordinate_space='original')
+    saved = [dict(id='train', source_id='board', x=0, y=0, width=640, height=640, split='train'),
+             dict(id='val', source_id='board', x=860, y=360, width=640, height=640, split='val')]
+    manifest = dict(config=dict(tile_size=640, overlap=128), sources=[source], tiles=saved)
+    layout = inspection._tile_layouts(manifest)['board']
+    assert layout['complete_grid'] is True
+    assert len(layout['tiles']) == 6
+    assert layout['tiles'][:2] == [{key: value for key, value in tile.items() if key != 'source_id'} for tile in saved]
+    omitted = [tile for tile in layout['tiles'] if tile['split'] == 'omitted']
+    assert {(tile['x'], tile['y']) for tile in omitted} == {(512, 0), (860, 0), (0, 360), (512, 360)}
+    assert all(tile['width'] == 640 and tile['height'] == 640 for tile in omitted)
+    # The complete grid covers every region between its boundaries, including
+    # the anchored right/bottom edges and overlaps next to omitted windows.
+    xs = sorted({0, 1500, *(tile['x'] for tile in layout['tiles']), *(tile['x'] + tile['width'] for tile in layout['tiles'])})
+    ys = sorted({0, 1000, *(tile['y'] for tile in layout['tiles']), *(tile['y'] + tile['height'] for tile in layout['tiles'])})
+    for left, right in zip(xs, xs[1:]):
+        for top, bottom in zip(ys, ys[1:]):
+            x, y = (left + right) / 2, (top + bottom) / 2
+            assert any(t['x'] <= x < t['x'] + t['width'] and t['y'] <= y < t['y'] + t['height'] for t in layout['tiles'])
+    assert all('source_id' in tile for tile in saved)  # The input snapshot is unchanged.
+
+
+def test_complete_grid_handles_small_sources_and_invalid_saved_settings():
+    source = dict(id='small', width=300, height=200, coordinate_space='original')
+    manifest = dict(config=dict(tile_size=640, overlap=128), sources=[source], tiles=[])
+    layout = inspection._tile_layouts(manifest)['small']
+    assert layout['complete_grid'] is True
+    assert layout['tiles'] == [dict(id='small__omitted_0_0', x=0, y=0, width=300, height=200, split='omitted')]
+    manifest['config']['overlap'] = 640
+    layout = inspection._tile_layouts(manifest)['small']
+    assert layout['complete_grid'] is False
+    assert layout['tiles'] == []
+
+
 def test_overview_removes_only_one_label_and_preserves_completed_review(client, tmp_path, monkeypatch):
     run_id, doc = setup_run(client, tmp_path, monkeypatch, corrected=True)
     url = f'/api/inspection/runs/{run_id}'

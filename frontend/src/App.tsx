@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
 import MiteOverview, { initialOverviewView } from "./MiteOverview";
-import type { Doc, ModelRegistry, Point, PredictionStatus, SourceFocus, TrainingStatus } from "./types";
+import type { Doc, ModelRegistry, Point, PredictionStatus, SourceFocus, TileContext, TrainingStatus } from "./types";
 import { api, json } from "./api";
 import { followPrediction, requestPrediction } from "./prediction";
 
@@ -22,6 +22,9 @@ export default function App() {
     [busy, setBusy] = useState(false);
   const [corrected, setCorrected] = useState(false);
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
+  const [tilesVisible, setTilesVisible] = useState(false);
+  const [tileContext, setTileContext] = useState<TileContext | null>(null);
+  function toggleTiles() { setTilesVisible(visible => !visible); }
   const [focusTarget, setFocusTarget] = useState<SourceFocus | null>(null);
   const editable = corrected || doc?.coordinate_space === "original";
   const [exchangeDirectory, setExchangeDirectory] = useState("");
@@ -371,8 +374,14 @@ export default function App() {
   }, [trainingStatus?.state]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (e.target instanceof Element && e.target.closest("input,textarea,select,[contenteditable]:not([contenteditable='false'])")) return;
+      if (e.code === "KeyT" && !e.ctrlKey && !e.metaKey && !e.altKey &&
+          !e.repeat && !e.isComposing && !busy && (doc || page === "overview")) {
+        e.preventDefault();
+        toggleTiles();
+        return;
+      }
       if (page !== "annotate") return;
-      if ((e.target as HTMLElement).closest("input,textarea,select,[contenteditable]:not([contenteditable='false'])")) return;
       if (
         e.code === "KeyH" && !e.ctrlKey && !e.metaKey && !e.altKey &&
         !e.repeat && !e.isComposing && doc && !busy
@@ -448,7 +457,7 @@ export default function App() {
           <button onClick={() => setError("")}>Dismiss</button>
         </div>
       )}
-      {page === "overview" ? <MiteOverview view={overviewView} setView={setOverviewView} refreshKey={trainingStatus?.finished_at} savingChanged={setBusy} documentUpdated={(updated, annotationId) => {
+      {page === "overview" ? <MiteOverview view={overviewView} setView={setOverviewView} tilesVisible={tilesVisible} toggleTiles={toggleTiles} refreshKey={trainingStatus?.finished_at} savingChanged={setBusy} documentUpdated={(updated, annotationId) => {
         setList(items => items.map(item => item.image_id === updated.image_id ? updated : item));
         if (current.current?.image_id === updated.image_id) {
           show(updated);
@@ -463,6 +472,7 @@ export default function App() {
         const annotation = current.current?.annotations.find(a => Math.abs(a.x - item.x) < 1e-6 && Math.abs(a.y - item.y) < 1e-6);
         select(annotation?.id || null);
         setAnnotationsVisible(true);
+        setTileContext(item.tileContext || null);
         setActiveWorkflowStep("annotate");
         setFocusTarget({ imageId: item.source_id, annotationId: annotation?.id || null,
           x: item.x, y: item.y, requestId: crypto.randomUUID() });
@@ -1318,6 +1328,9 @@ export default function App() {
               corrected={corrected}
               annotationsVisible={annotationsVisible}
               toggleAnnotations={toggleAnnotations}
+              tilesVisible={tilesVisible}
+              toggleTiles={toggleTiles}
+              tileContext={tileContext}
               focusTarget={focusTarget}
               clearFocus={() => setFocusTarget(null)}
               corners={corners}

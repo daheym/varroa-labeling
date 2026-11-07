@@ -78,6 +78,12 @@ def build_inspection(run_id: str):
 @app.get('/api/inspection/runs/{run_id}')
 def inspection_run(run_id: str):
     result = inspection.payload(inspection_root(), run_id)
+    result['tile_layouts'] = inspection.tile_layouts(inspection_root(), run_id)
+    size = result.get('crop_size', 96)
+    for item in result['items']:
+        # Match Pillow's saved crop origin, including ties-to-even rounding.
+        item['crop_bounds'] = dict(x=round(item['x'] - size / 2), y=round(item['y'] - size / 2),
+                                   width=size, height=size)
     with lock:
         result['reviews'] = inspection.read_reviews(ROOT, result['items'])
         result['confirmed_predictions'] = inspection.confirmed_predictions(inspection_root(), run_id, result['items'], read)
@@ -93,6 +99,12 @@ def inspection_crop(run_id: str, filename: str):
     if target.parent != directory or target.suffix != '.jpg' or not target.is_file():
         raise HTTPException(404, 'Unknown crop')
     return FileResponse(target)
+
+
+@app.get('/api/images/{image_id}/tiles')
+def image_tiles(image_id: str):
+    with lock:
+        return inspection.latest_tile_context(inspection_root(), read(image_id))
 
 
 @app.put('/api/inspection/review')

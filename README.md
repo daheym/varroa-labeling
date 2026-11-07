@@ -37,6 +37,19 @@ Mouse wheel zooms around the pointer. Hold Space while dragging to pan. Fit imag
 
 Press **H** or click **Hide annotations / Show annotations** above the canvas to compare predictions with the unobstructed image. This temporarily hides all annotation markers without changing saved labels, prediction review state, or the current zoom and pan. Adding and moving annotations is disabled while markers are hidden; zooming and panning remain available. The shortcut is ignored while typing in form fields.
 
+Press **T** or click **Show tile borders / Hide tile borders** to inspect the full
+tile grid and its overlaps. Solid cyan outlines show training tiles, dashed purple
+outlines show validation tiles, and faint dotted gray outlines show tiles omitted
+from the run. Omitted windows are reconstructed from the run's saved tile size,
+overlap, and source dimensions, including the edge-anchored final row and column;
+retained tile geometry and membership come directly from its saved manifest.
+The overlay starts off and works independently of annotation visibility, zoom,
+and pan. The legend includes counts for each usage. Images opened directly use the
+latest completed run with matching image geometry. The toolbar names that run.
+Older runs without grid settings show only saved tiles and an explanation that
+the complete grid is unavailable. The T shortcut ignores form fields, editable
+text, modifier combinations, and held-key repeats.
+
 Only one model batch is accepted per image to prevent accidental duplication and preserve experiment provenance. The backend forces imported predictions to unreviewed/model regardless of their submitted flags. IDs must be unique across retained and rejected annotations. Legacy single-image candidate and annotation-export API endpoints remain available; use Dataset exchange for the current portable format.
 
 ## Coordinates and files
@@ -55,6 +68,21 @@ Each annotation appears once; overlapping tiles may give mixed results and may
 put an object in both train and validation. Unmatched predictions are shown too
 and can repeat across overlapping tiles. Colors describe agreement with saved
 annotations, not a final judgment about the object.
+
+**Show tile borders** at the top of **Mite overview** also overlays the crop grid
+and enlarged crop details. A dashed gold halo highlights tiles contributing
+outcomes to each crop while preserving their training/validation color. The
+details report training, validation, and omitted tile counts at the crop center.
+Both the overview header and crop dialog have a toggle, and **T** works in both.
+Visibility stays synchronized across the overview, dialog, and source image.
+**Open source image** carries
+the selected run, contributing tiles, and overlay visibility to the full image so
+you can compare complete tile windows. Borders outside a small crop are visible
+there. The overlay always includes all splits and omitted windows, regardless of the Membership
+filter, to make overlaps visible. It uses saved run geometry rather than current
+tiling settings, needs no retraining or overview rebuild, and is withheld if the
+source view or perspective no longer matches. Restart the backend and reload the
+frontend after updating to enable the tile endpoints.
 
 For an orange **Unmatched prediction** that is actually a mite, click the crop and
 choose **Confirm mite — add label**. This saves a reviewed mite annotation at the
