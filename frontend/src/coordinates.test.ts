@@ -5,6 +5,7 @@ import {
   zoomAt,
   inside,
   clampPoint,
+  viewAroundPoint,
 } from "./coordinates";
 describe("original pixel coordinates", () => {
   it("round trips fractional pixels across pan, zoom and viewport offsets", () => {
@@ -22,6 +23,14 @@ describe("original pixel coordinates", () => {
       p = { x: 811, y: 414 };
     const before = screenToImage(p, v);
     expect(screenToImage(p, zoomAt(p, v, 2))).toEqual(before);
+  });
+  it("centers an inspection label from a large source image in the viewport", () => {
+    const point = { x: 3148.674982881224, y: 2919.3778574532134 };
+    const viewport = { width: 1100, height: 800 };
+    const view = viewAroundPoint(point, viewport);
+    expect(imageToScreen(point, view)).toEqual({ x: 550, y: 400 });
+    expect(view.scale).toBe(2.5);
+    expect(viewAroundPoint(point, { width: 2400, height: 1600 }).scale).toBe(4);
   });
   it("uses CSS stage coordinates independent of device pixel ratio", () => {
     expect(

@@ -18,6 +18,9 @@ from .detector import (
     configured_detector,
 )
 from .perspective import build_transform, transform_points, normalize_image
+from . import inspection
+from pydantic import BaseModel, ConfigDict
+from typing import Literal
 
 NORMALIZATION = json.loads(Path(os.environ.get('VARROA_NORMALIZATION_CONFIG',
     Path(__file__).resolve().parents[2] / 'normalization.json')).read_text('utf-8'))
@@ -30,6 +33,103 @@ lock = threading.RLock()
 detector = configured_detector(NORMALIZATION)
 prediction_jobs = {}
 prediction_lock = threading.Lock()
+
+
+class QualityReview(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    run_id: str
+    item_id: str
+    reason: Literal['not_mite'] | None
+    expected_annotation_id: str | None = None
+
+
+class ConfirmMite(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    run_id: str
+    item_id: str
+
+
+class PredictionReview(ConfirmMite):
+    decision: Literal['not_mite'] | None
+    expected_annotation_id: str | None = None
+
+
+def inspection_root():
+    return Path(getattr(detector, 'training_root', os.environ.get(
+        'VARROA_TRAINING_ROOT', Path(__file__).resolve().parents[3] / 'varroa-training')))
+
+
+@app.get('/api/inspection/runs')
+def inspection_runs():
+    return [{key: value for key, value in run.items() if key != 'path'}
+            for run in inspection.runs(inspection_root())]
+
+
+@app.post('/api/inspection/runs/{run_id}/build')
+def build_inspection(run_id: str):
+    python = getattr(detector, 'python', None)
+    if python is None:
+        raise HTTPException(503, 'Training Python is unavailable')
+    with lock:
+        inspection.build(inspection_root(), python, run_id)
+    return {'ready': True}
+
+
+@app.get('/api/inspection/runs/{run_id}')
+def inspection_run(run_id: str):
+    result = inspection.payload(inspection_root(), run_id)
+    with lock:
+        result['reviews'] = inspection.read_reviews(ROOT, result['items'])
+        result['confirmed_predictions'] = inspection.confirmed_predictions(inspection_root(), run_id, result['items'], read)
+        result['prediction_reviews'] = inspection.read_prediction_reviews(ROOT, inspection_root(), run_id)
+        result['annotation_states'] = inspection.annotation_states(ROOT, result['items'], read)
+    return result
+
+
+@app.get('/api/inspection/runs/{run_id}/crops/{filename}')
+def inspection_crop(run_id: str, filename: str):
+    directory = (inspection.run_path(inspection_root(), run_id) / 'inspection' / 'crops').resolve()
+    target = (directory / filename).resolve()
+    if target.parent != directory or target.suffix != '.jpg' or not target.is_file():
+        raise HTTPException(404, 'Unknown crop')
+    return FileResponse(target)
+
+
+@app.put('/api/inspection/review')
+def inspection_review(review: QualityReview):
+    with lock:
+        result = inspection.save_review(ROOT, inspection_root(), review.run_id,
+                                        review.item_id, review.reason, read, write, validate_points,
+                                        review.expected_annotation_id)
+        items = inspection.payload(inspection_root(), review.run_id)['items']
+        result['annotation_states'] = inspection.annotation_states(ROOT, items, read)
+        result['confirmed_predictions'] = inspection.confirmed_predictions(inspection_root(), review.run_id, items, read)
+        return result
+
+
+@app.post('/api/inspection/confirm-mite')
+def inspection_confirm_mite(request: ConfirmMite):
+    with lock:
+        result = inspection.confirm_mite(ROOT, inspection_root(), request.run_id,
+                                        request.item_id, read, write, validate_points)
+        result['confirmed_predictions'] = inspection.confirmed_predictions(
+            inspection_root(), request.run_id, inspection.payload(inspection_root(), request.run_id)['items'], read)
+        result['prediction_reviews'] = inspection.save_prediction_review(
+            ROOT, inspection_root(), request.run_id, request.item_id, None)
+        result['annotation_states'] = inspection.annotation_states(
+            ROOT, inspection.payload(inspection_root(), request.run_id)['items'], read)
+        return result
+
+
+@app.put('/api/inspection/prediction-review')
+def inspection_prediction_review(request: PredictionReview):
+    with lock:
+        result = inspection.review_prediction(ROOT, inspection_root(), request.run_id, request.item_id,
+                                               request.decision, request.expected_annotation_id, read, write)
+        items = inspection.payload(inspection_root(), request.run_id)['items']
+        result['annotation_states'] = inspection.annotation_states(ROOT, items, read)
+        result['confirmed_predictions'] = inspection.confirmed_predictions(inspection_root(), request.run_id, items, read)
+        return result
 
 
 def path(image_id):
@@ -93,6 +193,9 @@ def reset_document(doc):
     doc.model_version = None
     doc.effort = Effort()
     write(doc)
+    recovery = ROOT / 'annotation_reviews' / f'{doc.image_id}.json'
+    if recovery.exists():
+        recovery.replace(history / f'{doc.image_id}-overview-recovery-{uuid.uuid4()}.json')
     return doc
 
 
@@ -111,6 +214,39 @@ def reset_all(payload: ResetConfirmation):
 def reset_image(image_id: str):
     with lock:
         return reset_document(read(image_id))
+
+
+@app.post('/api/images/{image_id}/predictions/discard-unreviewed')
+def discard_unreviewed_predictions(image_id: str):
+    with prediction_lock, lock:
+        doc = read(image_id)
+        if prediction_jobs.get(image_id, {}).get('state') == 'running':
+            raise HTTPException(409, 'Wait for prediction to finish before discarding results')
+        retained = [a for a in doc.annotations if a.source != 'model' or a.reviewed]
+        release_batch = not any(a.source == 'model' for a in retained + doc.rejected_predictions)
+        if len(retained) == len(doc.annotations) and not (release_batch and doc.model_version):
+            return doc
+        history = ROOT / 'history'
+        history.mkdir(exist_ok=True)
+        (history / f'{image_id}-discard-{uuid.uuid4()}.json').write_text(
+            doc.model_dump_json(indent=2), encoding='utf-8')
+        doc.annotations = retained
+        if release_batch:
+            doc.model_version = None
+            before = ROOT / 'prediction_history' / f'{image_id}.before.json'
+            if before.exists():
+                previous = Document.model_validate_json(before.read_text('utf-8'))
+                # Restore completion only when the pre-prediction document is
+                # otherwise unchanged. Never overwrite edits made since inference.
+                exclude = {'review_complete', 'model_version'}
+                if doc.model_dump(exclude=exclude) == previous.model_dump(exclude=exclude):
+                    doc.review_complete = previous.review_complete
+            for suffix in ('.json', '.before.json'):
+                artifact = ROOT / 'prediction_history' / f'{image_id}{suffix}'
+                if artifact.exists():
+                    artifact.replace(history / f'{image_id}-discard-{uuid.uuid4()}{suffix}')
+        write(doc)
+        return doc
 
 
 @app.post('/api/images')
@@ -160,6 +296,8 @@ def delete_image(image_id: str):
             ROOT / 'images' / f'{image_id}.png',
             ROOT / 'prediction_history' / f'{image_id}.json',
             ROOT / 'prediction_history' / f'{image_id}.before.json',
+            ROOT / 'annotation_reviews' / f'{image_id}.json',
+            ROOT / 'annotation_reviews' / f'{image_id}.tmp',
         ]
         for folder, pattern in (
             ('corrected', f'{image_id}-*.png'),

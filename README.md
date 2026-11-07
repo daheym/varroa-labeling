@@ -41,6 +41,89 @@ Only one model batch is accepted per image to prevent accidental duplication and
 
 ## Coordinates and files
 
+### Mite overview
+
+The header's **Mite overview** tab displays completed runs from the configured
+sibling training repository. It shows a dense grid of individual 96px mite context
+crops, with adjustable display size and filters for run, source image, training or
+validation membership, discrepancies and current label status. Click a crop to enlarge
+it, inspect confidence and individual tile outcomes, or open its source image.
+Each annotation appears once; overlapping tiles may give mixed results and may
+put an object in both train and validation. Unmatched predictions are shown too
+and can repeat across overlapping tiles. Colors describe agreement with saved
+annotations, not a final judgment about the object.
+
+For an orange **Unmatched prediction** that is actually a mite, click the crop and
+choose **Confirm mite — add label**. This saves a reviewed mite annotation at the
+prediction center, with its confidence and training-run provenance, for the next
+training dataset. A nearby existing annotation within the run's matching tolerance
+is reused to avoid duplicates from overlapping tiles or repeated clicks; a nearby
+unreviewed prediction is accepted in place. Confirmed predictions show a green
+check and can be found with **Review status → Confirmed mites from predictions**.
+Saved run predictions and metrics retain their original results.
+
+For an unmatched prediction that is **not** a mite, choose **Mark reviewed: not a
+mite**. If it has no current label, a gray minus badge records that you checked it.
+If it is linked to a current reviewed label, **Not a mite — remove label** offers a
+confirmation and deletes that one linked annotation directly. A current label takes
+priority over an old review mark. Nearby labels and tiles are preserved.
+
+Use **Review status → Unreviewed predictions** to work through remaining
+detections, **Reviewed predictions** to see completed decisions, or **Reviewed:
+not a mite** to revisit rejections. The progress counter follows the current result,
+membership, and source filters. Decisions persist per crop and run in
+`data/inspection_reviews/`; repeated views from overlapping tiles can be reviewed
+separately. **Clear review mark** undoes a rejection. Confirming a mite later clears
+its rejection mark. Back up `inspection_reviews` with app data.
+
+The collapsible **Category guide** explains each result color, train/validation
+membership, review badges, and what each review action changes. Filter explanations
+update with your selection, and crop details include the result meaning and suggested
+next step.
+
+**Open source image** makes annotation markers visible and zooms to the matching
+current label, with its coordinates shown above the canvas. If there is no label
+at the saved crop center, the status message says so. Run results refer to the saved
+annotation snapshot; a label marked reviewed can still be mistaken.
+
+For an existing annotation, choose **Not a mite — remove label**, then confirm the
+on-screen explanation. This removes only that annotation from the live labeled
+data. Its image area remains available as background, with neighboring mites and
+tiles intact. An already completed image review stays complete, so no visit to the
+source editor or second completion step is needed. Incomplete reviews stay incomplete.
+The historical crop stays visible with a red **× Removed label** badge, derived from
+the current annotation document, including deletions made in the source editor.
+Use **Review status → Removed labels** to find these crops, or **Current mite labels**
+to see labels still present. **Restore label — it is a mite** reverses an overview
+removal and preserves original annotation provenance. Recovery records live in
+`data/annotation_reviews/`, and pre-edit documents are archived in `data/history/`.
+Back up both directories with the app data. Restoration is available only for
+removals recorded by this feature.
+
+Adding or accepting a previously missing mite still reopens source image review.
+Use **Open source image** to adjust a center and finish that review before training.
+Changed source content, perspective, or annotation coordinates block edits from
+an old run rather than deleting a different nearby annotation.
+
+New training runs generate the overview automatically. For an older run, choose
+**Build saved overview**; this uses saved predictions without retraining. Training
+crops without saved predictions are explicitly marked **Not evaluated**. Future
+runs also save training reconstruction diagnostics separately from validation scores.
+Use **Refresh runs** after externally completed training. Restart the backend and
+reload the frontend after installing this feature.
+
+Legacy **not a mite** and **poor quality** flags under `data/quality_reviews/` no
+longer exclude tiles during preparation in the updated sibling training repository.
+They remain visible under **Legacy flags — review labels** while a label is present,
+so you can explicitly review and delete mistaken labels. Old flags are never silently
+converted into deletions and do not produce the red removed-label badge. Existing
+prepared datasets, runs and metrics remain unchanged; the next preparation uses the
+current labels. The annotation changes are included in normal dataset exports.
+
+API: `GET /api/inspection/runs`, `GET /api/inspection/runs/{id}`,
+`POST /api/inspection/runs/{id}/build`, `PUT /api/inspection/review`, and
+`POST /api/inspection/confirm-mite`, and `PUT /api/inspection/prediction-review`.
+
 ```text
 backend/app/          API, validated schemas, detector interface
 backend/tests/        API, persistence, review, EXIF and homography tests
@@ -61,6 +144,8 @@ Effort counters record adds, acceptance actions, deletes, moves, undo and redo w
 ## Model integration
 
 ### Reset annotations
+
+To remove test predictions without losing training labels, open **Annotate and review → Model review mode → Discard unreviewed predictions**. This removes only unreviewed model markers from the current image, preserving human labels, accepted/corrected predictions, rejected predictions, geometry, and effort statistics. It does not record rejection decisions. Pending saves finish first and undo history is cleared. When no model records remain, the batch is released for another prediction request and its baseline is archived under `data/history`. If the document otherwise matches its pre-prediction snapshot, its previous completion status is restored. Restart the API after updating for the new `POST /api/images/{id}/predictions/discard-unreviewed` endpoint.
 
 The sidebar provides **Reset current image annotations** (confirmation required) and **Reset ALL annotations...** (type `RESET ALL`). These permanently clear retained annotations, rejected predictions, review status, model-version provenance, and effort statistics for the chosen scope. Original images, corrected images, perspective metadata, and dataset version are preserved. Undo/redo history is cleared. Pending autosaves finish before reset. A cleared image can import a new prediction batch.
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Canvas from "./Canvas";
+import MiteOverview from "./MiteOverview";
 import type { Doc, ModelRegistry, Point, PredictionStatus, TrainingStatus } from "./types";
 import { api, json } from "./api";
 import { followPrediction, requestPrediction } from "./prediction";
@@ -7,6 +8,7 @@ import { followPrediction, requestPrediction } from "./prediction";
 type WorkflowStep = "image" | "prepare" | "annotate" | "finish" | "exchange" | "train";
 
 export default function App() {
+  const [page, setPage] = useState<"annotate" | "overview">("annotate");
   const [list, setList] = useState<Doc[]>([]),
     [doc, setDoc] = useState<Doc | null>(null),
     [selected, select] = useState<string | null>(null),
@@ -19,6 +21,7 @@ export default function App() {
     [busy, setBusy] = useState(false);
   const [corrected, setCorrected] = useState(false);
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
+  const [focusLabel, setFocusLabel] = useState<{ imageId: string; annotationId: string; requestId: string } | null>(null);
   const editable = corrected || doc?.coordinate_space === "original";
   const [exchangeDirectory, setExchangeDirectory] = useState("");
   const [exchangeVersion, setExchangeVersion] = useState("2026-09-12-001");
@@ -177,6 +180,7 @@ export default function App() {
   async function load(id: string) {
     await flush();
     const d = await api<Doc>(`/api/images/${id}`);
+    setFocusLabel(null);
     show(d);
     setPredictionStatus(null);
     past.current = [];
@@ -223,6 +227,25 @@ export default function App() {
       setStatus("Prediction failed");
       throw e;
     }
+  }
+  async function discardUnreviewedPredictions() {
+    await run(async () => {
+      await flush();
+      const image = current.current;
+      if (!image) return;
+      const updated = await api<Doc>(
+        `/api/images/${image.image_id}/predictions/discard-unreviewed`,
+        { method: "POST" },
+      );
+      show(updated);
+      setList((items) => items.map((item) => item.image_id === updated.image_id ? updated : item));
+      past.current = [];
+      future.current = [];
+      select(null);
+      setPredictionStatus(null);
+      setReviewStats(null);
+      setStatus("Unreviewed predictions discarded. Existing labels kept.");
+    });
   }
   async function resetAnnotations(all: boolean) {
     if (all) {
@@ -347,6 +370,7 @@ export default function App() {
   }, [trainingStatus?.state]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (page !== "annotate") return;
       if ((e.target as HTMLElement).closest("input,textarea,select,[contenteditable]:not([contenteditable='false'])")) return;
       if (
         e.code === "KeyH" && !e.ctrlKey && !e.metaKey && !e.altKey &&
@@ -401,6 +425,10 @@ export default function App() {
         <h1>
           Varroa <span>dataset annotation</span>
         </h1>
+        <nav className="workspace-tabs" aria-label="Workspace">
+          <button aria-pressed={page === "annotate"} disabled={busy} onClick={() => setPage("annotate")}>Annotate</button>
+          <button aria-pressed={page === "overview"} disabled={busy} onClick={() => void run(async () => { await flush(); setPage("overview"); })}>Mite overview</button>
+        </nav>
         <span role="status">{busy ? predictionStatus?.state === "running" ? "Predicting…" : "Working…" : status}</span>
         <button
           disabled={busy}
@@ -419,7 +447,28 @@ export default function App() {
           <button onClick={() => setError("")}>Dismiss</button>
         </div>
       )}
-      <div className="workspace">
+      {page === "overview" ? <MiteOverview refreshKey={trainingStatus?.finished_at} savingChanged={setBusy} documentUpdated={(updated, annotationId) => {
+        setList(items => items.map(item => item.image_id === updated.image_id ? updated : item));
+        if (current.current?.image_id === updated.image_id) {
+          show(updated);
+          past.current = [];
+          future.current = [];
+          select(annotationId);
+          setReviewStats(null);
+          setStatus("Saved");
+        }
+      }} openSource={(item) => void run(async () => {
+        await load(item.source_id);
+        const annotation = current.current?.annotations.find(a => Math.abs(a.x - item.x) < 1e-6 && Math.abs(a.y - item.y) < 1e-6);
+        select(annotation?.id || null);
+        setAnnotationsVisible(true);
+        setActiveWorkflowStep("annotate");
+        setFocusLabel(annotation ? { imageId: item.source_id, annotationId: annotation.id, requestId: crypto.randomUUID() } : null);
+        setStatus(annotation
+          ? `Located current label at ${annotation.x.toFixed(1)}, ${annotation.y.toFixed(1)}`
+          : "No current label at this saved crop center. The run snapshot may differ from the current annotations.");
+        setPage("annotate");
+      })} /> : <div className="workspace">
         <aside>
           <details
             className="workflow-step"
@@ -838,6 +887,20 @@ export default function App() {
                     >
                       Accept all remaining predictions
                     </button>
+                    <button
+                      type="button"
+                      disabled={!doc.annotations.some((a) => a.source === "model" && !a.reviewed) &&
+                        !(doc.model_version && !doc.annotations.some((a) => a.source === "model") && !doc.rejected_predictions.length)}
+                      onClick={() => void discardUnreviewedPredictions()}
+                    >
+                      Discard unreviewed predictions
+                    </button>
+                    <p>
+                      Discard removes unreviewed model markers from this image,
+                      keeping human labels and reviewed predictions. It does not
+                      mark predictions as rejected. When no model records remain,
+                      you can request a new batch. Discard clears undo history.
+                    </p>
                     <p>
                       Deleting an unreviewed prediction rejects it. Finish image
                       review separately after checking the whole image.
@@ -1253,6 +1316,7 @@ export default function App() {
               corrected={corrected}
               annotationsVisible={annotationsVisible}
               toggleAnnotations={toggleAnnotations}
+              focusLabel={focusLabel}
               corners={corners}
               setCorners={setCorners}
               add={(p) => {
@@ -1289,7 +1353,7 @@ export default function App() {
             </div>
           )}
         </section>
-      </div>
+      </div>}
     </main>
   );
 }

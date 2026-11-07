@@ -5,6 +5,7 @@ import {
   zoomAt,
   inside,
   clampPoint,
+  viewAroundPoint,
   type View,
 } from "./coordinates";
 import type { Doc, Point } from "./types";
@@ -21,6 +22,7 @@ type Props = {
   corrected: boolean;
   annotationsVisible: boolean;
   toggleAnnotations: () => void;
+  focusLabel: { imageId: string; annotationId: string; requestId: string } | null;
 };
 export default function Canvas(p: Props) {
   const editable = p.corrected || p.doc.coordinate_space === "original";
@@ -68,6 +70,12 @@ export default function Canvas(p: Props) {
     };
   }, [p.doc.image_id, p.corrected, p.doc.perspective?.file]);
   useEffect(fit, [p.doc.image_id, width, height, p.corrected, size.width, size.height]);
+  useEffect(() => {
+    if (!editable || p.focusLabel?.imageId !== p.doc.image_id) return;
+    const annotation = p.doc.annotations.find(a => a.id === p.focusLabel?.annotationId);
+    if (annotation) setView(viewAroundPoint(annotation, size));
+  }, [p.focusLabel, p.doc.image_id, editable, size.width, size.height]);
+  const selectedLabel = p.doc.annotations.find(a => a.id === p.selected);
   return (
     <div className="canvas-wrap" ref={container}>
       <div className="canvas-toolbar">
@@ -86,6 +94,9 @@ export default function Canvas(p: Props) {
         {!p.annotationsVisible && (
           <span role="status">Annotations hidden — show to add or move labels</span>
         )}
+        {p.annotationsVisible && selectedLabel && <span role="status">
+          Selected label: {selectedLabel.x.toFixed(1)}, {selectedLabel.y.toFixed(1)} · {selectedLabel.reviewed ? "marked reviewed" : "awaiting review"}
+        </span>}
       </div>
       {!image && (
         <div className="canvas-message">

@@ -267,6 +267,76 @@ def seeded_document(client):
     return client.put(f"/api/images/{doc['image_id']}/annotations", json=doc).json()
 
 
+def test_discard_test_predictions_preserves_training_labels_and_releases_batch(client):
+    original = upload(client)
+    other = upload(client)
+    base = f"/api/images/{original['image_id']}"
+    original['annotations'] = [{'id': 'human', 'x': 10, 'y': 20, 'source': 'human', 'reviewed': True}]
+    original['review_complete'] = True
+    original['effort']['manual_adds'] = 5
+    original = client.put(base+'/annotations', json=original).json()
+    payload = dict(model_version='test-v1', coordinate_space='canonical',
+                   perspective_file=original['perspective']['file'], annotations=[
+                       dict(id=f'duplicate-{i}', x=10, y=20, source='model', confidence=.8)
+                       for i in range(3)])
+    assert client.post(base+'/candidates', json=payload).status_code == 200
+    result = client.post(base+'/predictions/discard-unreviewed')
+    assert result.status_code == 200
+    assert result.json() == original
+    assert client.get(base).json() == original
+    assert client.get(f"/api/images/{other['image_id']}").json() == other
+    assert not (main.ROOT/'prediction_history'/f"{original['image_id']}.json").exists()
+    assert list((main.ROOT/'history').glob(f"{original['image_id']}-discard-*.json"))
+    assert client.post(base+'/predictions/discard-unreviewed').json() == original
+    assert client.post(base+'/candidates', json=payload).status_code == 200
+
+
+@pytest.mark.parametrize('decision', ['accepted', 'rejected', 'manual_edit'])
+def test_discard_preserves_reviewed_predictions_and_subsequent_edits(client, decision):
+    original = upload(client)
+    base = f"/api/images/{original['image_id']}"
+    original['review_complete'] = True
+    client.put(base+'/annotations', json=original)
+    payload = dict(model_version='test-v1', coordinate_space='canonical',
+                   perspective_file=original['perspective']['file'], annotations=[
+                       dict(id=f'prediction-{i}', x=10+i, y=20, source='model', confidence=.8)
+                       for i in range(2)])
+    doc = client.post(base+'/candidates', json=payload).json()
+    if decision == 'accepted':
+        doc['annotations'][0]['reviewed'] = True
+    elif decision == 'rejected':
+        rejected = doc['annotations'].pop(0)
+        rejected['reviewed'] = True
+        doc['rejected_predictions'].append(rejected)
+    else:
+        doc['annotations'].append(dict(id='new-human', x=30, y=40, source='human', reviewed=True))
+    doc['effort']['manual_adds'] = 7
+    doc = client.put(base+'/annotations', json=doc).json()
+    result = client.post(base+'/predictions/discard-unreviewed')
+    assert result.status_code == 200
+    expected = {**doc, 'annotations': [a for a in doc['annotations'] if a['reviewed']]}
+    if decision == 'manual_edit':
+        expected['model_version'] = None
+    assert result.json() == expected
+    assert result.json()['review_complete'] is False
+    assert client.get(base).json() == expected
+    if decision != 'manual_edit':
+        assert client.post(base+'/candidates', json=payload).status_code == 409
+        assert (main.ROOT/'prediction_history'/f"{original['image_id']}.json").exists()
+
+
+def test_discard_refuses_running_prediction_and_handles_empty_batch(client):
+    original = upload(client)
+    base = f"/api/images/{original['image_id']}"
+    main.prediction_jobs[original['image_id']] = {'state': 'running'}
+    assert client.post(base+'/predictions/discard-unreviewed').status_code == 409
+    assert client.get(base).json() == original
+    main.prediction_jobs.clear()
+    assert client.post(base+'/candidates', json=dict(model_version='empty-v1',
+        coordinate_space='canonical', perspective_file=original['perspective']['file'], annotations=[])).status_code == 200
+    assert client.post(base+'/predictions/discard-unreviewed').json() == original
+
+
 def test_reset_current_preserves_other_images_and_perspective(client):
     first, second = seeded_document(client), seeded_document(client)
     base = f"/api/images/{first['image_id']}"
